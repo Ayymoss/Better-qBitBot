@@ -120,6 +120,21 @@ public sealed class MessageAggregatorService(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to process aggregated question for user {UserId}", pending.UserId);
+            try
+            {
+                var topFrame = ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim() ?? "unknown";
+                var errorInfo = $"`{ex.GetType().Name}: {topFrame}`";
+
+                await restClient.SendMessageAsync(pending.ChannelId, new MessageProperties
+                {
+                    Content = $"Something went wrong while processing your request (auto-response). Please ping @ayymoss if this keeps happening.\n-# {errorInfo}",
+                    MessageReference = MessageReferenceProperties.Reply(pending.FirstMessageId)
+                });
+            }
+            catch (Exception replyEx)
+            {
+                logger.LogError(replyEx, "Failed to send error reply");
+            }
         }
     }
 
@@ -136,6 +151,10 @@ public sealed class MessageAggregatorService(
         {
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
         }
+
+        const int maxLength = 2000 - 72; // Reserve space for footer
+        if (text.Length > maxLength)
+            text = text[..(maxLength - 1)] + "…";
 
         return text;
     }

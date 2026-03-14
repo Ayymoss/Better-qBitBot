@@ -196,35 +196,43 @@ public sealed class MessageCreateHandler(
 
     private async Task RespondDirectly(Message message, string context, List<AttachmentInfo> attachments, bool isDirectInvocation = true)
     {
-        var result = await geminiService.AskAsync(context, attachments);
-
-        if (result is null)
-            return;
-
-        // For direct invocations (@mention / reply-to), give feedback on why we can't help
-        if (!result.ShouldRespond)
+        try
         {
-            if (isDirectInvocation)
+            var result = await geminiService.AskAsync(context, attachments);
+
+            if (result is null)
+                return;
+
+            // For direct invocations (@mention / reply-to), give feedback on why we can't help
+            if (!result.ShouldRespond)
             {
-                var rejection = result.IsPiracy
-                    ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
-                    : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
-
-                await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+                if (isDirectInvocation)
                 {
-                    Content = rejection + Footer,
-                    MessageReference = MessageReferenceProperties.Reply(message.Id)
-                });
-            }
-            return;
-        }
+                    var rejection = result.IsPiracy
+                        ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
+                        : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
-        var responseText = FormatResponse(result) + Footer;
-        await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+                    await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+                    {
+                        Content = rejection + Footer,
+                        MessageReference = MessageReferenceProperties.Reply(message.Id)
+                    });
+                }
+                return;
+            }
+
+            var responseText = FormatResponse(result) + Footer;
+            await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+            {
+                Content = responseText,
+                MessageReference = MessageReferenceProperties.Reply(message.Id)
+            });
+        }
+        catch (Exception ex)
         {
-            Content = responseText,
-            MessageReference = MessageReferenceProperties.Reply(message.Id)
-        });
+            logger.LogError(ex, "Failed to respond to message {MessageId} from user {UserId}", message.Id, message.Author.Id);
+            await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex);
+        }
     }
 
     private static bool IsBotMentioned(Message message, ulong botUserId) =>
@@ -248,6 +256,25 @@ public sealed class MessageCreateHandler(
         }
     }
 
+    private async Task SendErrorReply(ulong channelId, ulong replyToMessageId, string context, Exception ex)
+    {
+        try
+        {
+            var topFrame = ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim() ?? "unknown";
+            var errorInfo = $"`{ex.GetType().Name}: {topFrame}`";
+
+            await restClient.SendMessageAsync(channelId, new MessageProperties
+            {
+                Content = $"Something went wrong while processing your request ({context}). Please ping @ayymoss if this keeps happening.\n-# {errorInfo}",
+                MessageReference = MessageReferenceProperties.Reply(replyToMessageId)
+            });
+        }
+        catch (Exception replyEx)
+        {
+            logger.LogError(replyEx, "Failed to send error reply");
+        }
+    }
+
     private static string FormatResponse(GeminiResponse result)
     {
         var text = result.Response;
@@ -261,6 +288,10 @@ public sealed class MessageCreateHandler(
         {
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
         }
+
+        const int maxLength = 2000 - 72; // Reserve space for footer
+        if (text.Length > maxLength)
+            text = text[..(maxLength - 1)] + "…";
 
         return text;
     }

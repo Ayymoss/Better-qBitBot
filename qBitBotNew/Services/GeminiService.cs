@@ -28,7 +28,7 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
         Rules:
         - When confidence is "low", provide helpful resource links instead of guessing.
         - When confidence is "medium", answer but also include resources.
-        - Keep responses concise and actionable (under 1500 characters for Discord).
+        - Keep responses concise and actionable. Your response MUST be under 1500 characters — Discord has a hard 2000-character limit and space is needed for formatting.
         - Format your response using Discord markdown. Where needed, use numbered lists, bullet points, bold,
           and short paragraphs. Use \n for line breaks within the JSON response string — do NOT
           put everything on a single line.
