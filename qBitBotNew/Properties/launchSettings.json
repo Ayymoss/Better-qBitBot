@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "qBitBotNew": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

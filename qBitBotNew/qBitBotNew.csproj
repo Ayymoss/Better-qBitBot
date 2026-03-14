@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+      <UserSecretsId>511179a5-69e7-44c5-b337-ca899f07b377</UserSecretsId>
+  </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="NetCord" Version="1.0.0-alpha.475" />
+        <PackageReference Include="NetCord.Services" Version="1.0.0-alpha.475" />
+        <PackageReference Include="NetCord.Hosting" Version="1.0.0-alpha.475" />
+        <PackageReference Include="NetCord.Hosting.Services" Version="1.0.0-alpha.475" />
+        <PackageReference Include="NetCord.Hosting.AspNetCore" Version="1.0.0-alpha.475" />
+        <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0-preview.*" />
+        <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+        <PackageReference Include="Serilog.Sinks.File" Version="8.0.0-nblumhardt-02322" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
+</Project>
