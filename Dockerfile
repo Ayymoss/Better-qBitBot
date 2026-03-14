@@ -5,7 +5,7 @@ RUN dotnet restore qBitBotNew/qBitBotNew.csproj
 COPY . .
 RUN dotnet publish qBitBotNew/qBitBotNew.csproj -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/runtime:10.0-preview
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview
 WORKDIR /app
 COPY --from=build /app .
 ENTRYPOINT ["dotnet", "qBitBotNew.dll"]
