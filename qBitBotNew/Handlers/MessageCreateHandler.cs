@@ -18,7 +18,7 @@ public sealed class MessageCreateHandler(
     IOptions<BotConfig> config,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
-    private const string Footer = "\n-# This is an generated response. It may not be accurate.";
+    private const string Footer = "\n-# This is a generated response. It may not be accurate.";
     public async ValueTask HandleAsync(Message message)
     {
         // Ignore bots and DMs

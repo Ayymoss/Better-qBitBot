@@ -14,7 +14,7 @@ public sealed class MessageAggregatorService(
     IOptions<BotConfig> config,
     ILogger<MessageAggregatorService> logger) : IDisposable
 {
-    private const string Footer = "\n-# This is an automatic generated response. It may not be accurate.";
+    private const string Footer = "\n-# This is an automatically generated response. It may not be accurate.";
 
     // Key: (guildId, channelId, userId)
     private readonly ConcurrentDictionary<(ulong, ulong, ulong), PendingQuestion> _pending = new();
