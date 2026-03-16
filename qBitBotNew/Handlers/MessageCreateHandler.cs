@@ -1,10 +1,8 @@
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
 using NetCord.Rest;
-using qBitBotNew.Config;
 using qBitBotNew.Models;
 using qBitBotNew.Services;
 
@@ -12,11 +10,9 @@ namespace qBitBotNew.Handlers;
 
 public sealed class MessageCreateHandler(
     GeminiService geminiService,
-    MessageAggregatorService aggregatorService,
     RateLimiterService rateLimiterService,
     RestClient restClient,
     GatewayClient gatewayClient,
-    IOptions<BotConfig> config,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
     private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "This is a generated response. It may not be accurate." };
@@ -61,16 +57,7 @@ public sealed class MessageCreateHandler(
             return;
         }
 
-        // Check if another user is posting in a channel with a pending question (intervention detection)
-        if (aggregatorService.HasPendingQuestion(guildId, message.ChannelId, out var questionUserId)
-            && message.Author.Id != questionUserId)
-        {
-            aggregatorService.MarkIntervened(guildId, message.ChannelId, questionUserId);
-            return;
-        }
-
-        // Auto-response logic: only for new users
-        await HandlePotentialNewUserQuestion(message, guildId);
+        // No auto-response — bot only responds when explicitly invoked
     }
 
     private async Task HandleReplyToBot(Message message, RestMessage botMessage)
@@ -217,35 +204,6 @@ public sealed class MessageCreateHandler(
 
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
-
-    private async Task HandlePotentialNewUserQuestion(Message message, ulong guildId)
-    {
-        // Check user age — only auto-respond to new users (joined < threshold)
-        try
-        {
-            var guildUser = await restClient.GetGuildUserAsync(guildId, message.Author.Id);
-            var joinedAt = guildUser.JoinedAt;
-            var threshold = TimeSpan.FromHours(config.Value.NewUserThresholdHours);
-
-            if (DateTimeOffset.UtcNow - joinedAt > threshold)
-                return; // Not a new user, ignore
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get guild user info for {UserId}", message.Author.Id);
-            return;
-        }
-
-        // New user — add to aggregation window
-        var attachments = ExtractAttachments(message);
-        aggregatorService.AddMessage(
-            guildId,
-            message.ChannelId,
-            message.Author.Id,
-            message.Id,
-            message.Content,
-            attachments);
-    }
 
     private async Task RespondDirectly(Message message, string context, List<AttachmentInfo> attachments, bool isDirectInvocation = true)
     {

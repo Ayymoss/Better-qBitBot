@@ -50,7 +50,6 @@ try
     builder.Services.AddHttpClient<GeminiService>();
 
     // Services
-    builder.Services.AddSingleton<MessageAggregatorService>();
     builder.Services.AddSingleton<RateLimiterService>();
     builder.Services.AddSingleton<FeedbackService>();
 
