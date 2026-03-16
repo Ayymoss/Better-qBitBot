@@ -106,13 +106,14 @@ public sealed class MessageAggregatorService(
                 return;
             }
 
-            var responseText = FormatResponse(result) + Footer;
-
-            await restClient.SendMessageAsync(pending.ChannelId, new MessageProperties
+            var messages = FormatMessages(result);
+            for (var i = 0; i < messages.Count; i++)
             {
-                Content = responseText,
-                MessageReference = MessageReferenceProperties.Reply(pending.FirstMessageId)
-            });
+                var props = new MessageProperties { Content = messages[i] };
+                if (i == 0)
+                    props.MessageReference = MessageReferenceProperties.Reply(pending.FirstMessageId);
+                await restClient.SendMessageAsync(pending.ChannelId, props);
+            }
 
             logger.LogInformation("Responded to user {UserId} in channel {ChannelId} (confidence: {Confidence})",
                 pending.UserId, pending.ChannelId, result.Confidence);
@@ -138,7 +139,7 @@ public sealed class MessageAggregatorService(
         }
     }
 
-    private static string FormatResponse(GeminiResponse result)
+    private static List<string> FormatMessages(GeminiResponse result)
     {
         // Fix double-escaped newlines from Gemini (literal \\n instead of \n)
         var text = result.Response.Replace("\\n", "\n");
@@ -153,11 +154,38 @@ public sealed class MessageAggregatorService(
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
         }
 
-        const int maxLength = 2000 - 72; // Reserve space for footer
-        if (text.Length > maxLength)
-            text = text[..(maxLength - 1)] + "…";
+        return SplitForDiscord(text, Footer);
+    }
 
-        return text;
+    private static List<string> SplitForDiscord(string text, string footer)
+    {
+        const int maxLength = 2000;
+
+        if (text.Length + footer.Length <= maxLength)
+            return [text + footer];
+
+        var messages = new List<string>();
+        var remaining = text;
+
+        while (remaining.Length > 0)
+        {
+            if (remaining.Length + footer.Length <= maxLength)
+            {
+                messages.Add(remaining + footer);
+                break;
+            }
+
+            // Find a good split point (last newline before the limit)
+            var searchFrom = Math.Min(remaining.Length - 1, maxLength - 1);
+            var splitAt = remaining.LastIndexOf('\n', searchFrom);
+            if (splitAt <= 0)
+                splitAt = maxLength;
+
+            messages.Add(remaining[..splitAt]);
+            remaining = remaining[splitAt..].TrimStart('\n');
+        }
+
+        return messages;
     }
 
     public void Dispose()

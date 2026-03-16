@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
 using NetCord.Rest;
@@ -121,19 +122,19 @@ public sealed class MessageCreateHandler(
         if (anchorMessage is not null)
             excludeIds.Add(anchorMessage.Id);
 
-        // Filter to only the relevant user's messages, within 2 days
-        var userMessages = recentMessages
-            .Where(m => m.Author.Id == contextUserId)
+        // Include all non-bot messages within 2 days for full conversation context
+        var channelMessages = recentMessages
+            .Where(m => !m.Author.IsBot)
             .Where(m => !excludeIds.Contains(m.Id))
             .Where(m => now - m.CreatedAt < TimeSpan.FromDays(2))
             .OrderBy(m => m.Id)
             .ToList();
 
-        // Collect attachments from the invoking message + all context messages
+        // Collect attachments from the invoking message, anchor, and context user's messages
         var attachments = ExtractAttachments(invokingMessage);
         if (anchorMessage is not null)
             attachments.AddRange(ExtractAttachments(anchorMessage));
-        foreach (var m in userMessages)
+        foreach (var m in channelMessages.Where(m => m.Author.Id == contextUserId))
             attachments.AddRange(ExtractAttachments(m));
 
         // Build context with recency labels
@@ -143,24 +144,31 @@ public sealed class MessageCreateHandler(
         // Always include the anchor message first if present (the replied-to message, regardless of age)
         if (anchorMessage is not null)
         {
-            contextParts.Add($"[Primary question — this is the message the bot was invoked on]: {anchorMessage.Content}{(anchorMessage.Attachments.Any() ? " [has attached image]" : "")}");
+            var name = GetDisplayName(anchorMessage.Author);
+            contextParts.Add($"[Primary question — this is the message the bot was invoked on]:\n{name}: {anchorMessage.Content}{(anchorMessage.Attachments.Any() ? " [has attached image]" : "")}");
         }
 
-        var olderMessages = userMessages.Where(m => now - m.CreatedAt >= recentThreshold).ToList();
-        var recentContextMessages = userMessages.Where(m => now - m.CreatedAt < recentThreshold).ToList();
+        var olderMessages = channelMessages.Where(m => now - m.CreatedAt >= recentThreshold).ToList();
+        var recentContextMessages = channelMessages.Where(m => now - m.CreatedAt < recentThreshold).ToList();
 
         if (olderMessages.Count > 0)
         {
             contextParts.Add("[Older context — for background only]");
             foreach (var m in olderMessages)
-                contextParts.Add($"{m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+            {
+                var name = GetDisplayName(m.Author);
+                contextParts.Add($"{name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+            }
         }
 
         if (recentContextMessages.Count > 0)
         {
             contextParts.Add("[Relevant context — within the last 24 hours]");
             foreach (var m in recentContextMessages)
-                contextParts.Add($"{m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+            {
+                var name = GetDisplayName(m.Author);
+                contextParts.Add($"{name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+            }
         }
 
         // Handle the invoking message itself
@@ -169,7 +177,8 @@ public sealed class MessageCreateHandler(
 
         if (!string.IsNullOrWhiteSpace(invokerText))
         {
-            contextParts.Add($"[Current question — respond to THIS]: {invokerText}");
+            var invokerName = GetDisplayName(invokingMessage.Author);
+            contextParts.Add($"[Current question — respond to THIS]:\n{invokerName}: {invokerText}");
         }
         else if (anchorMessage is null)
         {
@@ -178,6 +187,9 @@ public sealed class MessageCreateHandler(
 
         return (string.Join("\n", contextParts), attachments);
     }
+
+    private static string GetDisplayName(User author) =>
+        (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
 
     private async Task HandlePotentialNewUserQuestion(Message message, ulong guildId)
     {
@@ -235,12 +247,14 @@ public sealed class MessageCreateHandler(
                 return;
             }
 
-            var responseText = FormatResponse(result) + Footer;
-            await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+            var messages = FormatMessages(result);
+            for (var i = 0; i < messages.Count; i++)
             {
-                Content = responseText,
-                MessageReference = MessageReferenceProperties.Reply(message.Id)
-            });
+                var props = new MessageProperties { Content = messages[i] };
+                if (i == 0)
+                    props.MessageReference = MessageReferenceProperties.Reply(message.Id);
+                await restClient.SendMessageAsync(message.ChannelId, props);
+            }
         }
         catch (Exception ex)
         {
@@ -289,7 +303,7 @@ public sealed class MessageCreateHandler(
         }
     }
 
-    private static string FormatResponse(GeminiResponse result)
+    private static List<string> FormatMessages(GeminiResponse result)
     {
         // Fix double-escaped newlines from Gemini (literal \\n instead of \n)
         var text = result.Response.Replace("\\n", "\n");
@@ -304,10 +318,37 @@ public sealed class MessageCreateHandler(
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
         }
 
-        const int maxLength = 2000 - 72; // Reserve space for footer
-        if (text.Length > maxLength)
-            text = text[..(maxLength - 1)] + "…";
+        return SplitForDiscord(text, Footer);
+    }
 
-        return text;
+    private static List<string> SplitForDiscord(string text, string footer)
+    {
+        const int maxLength = 2000;
+
+        if (text.Length + footer.Length <= maxLength)
+            return [text + footer];
+
+        var messages = new List<string>();
+        var remaining = text;
+
+        while (remaining.Length > 0)
+        {
+            if (remaining.Length + footer.Length <= maxLength)
+            {
+                messages.Add(remaining + footer);
+                break;
+            }
+
+            // Find a good split point (last newline before the limit)
+            var searchFrom = Math.Min(remaining.Length - 1, maxLength - 1);
+            var splitAt = remaining.LastIndexOf('\n', searchFrom);
+            if (splitAt <= 0)
+                splitAt = maxLength;
+
+            messages.Add(remaining[..splitAt]);
+            remaining = remaining[splitAt..].TrimStart('\n');
+        }
+
+        return messages;
     }
 }
