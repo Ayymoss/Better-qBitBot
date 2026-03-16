@@ -16,7 +16,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
     ]);
 
     [SlashCommand("qbit", "Ask a qBitTorrent question")]
-    public async Task<InteractionMessageProperties?> Ask(
+    public async Task Ask(
         [SlashCommandParameter(Name = "question", Description = "Your qBitTorrent question")] string question)
     {
         // Defer since Gemini takes a while
@@ -30,7 +30,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             {
                 Content = "Something went wrong — couldn't get a response. Try again later."
             });
-            return null;
+            return;
         }
 
         if (!result.ShouldRespond)
@@ -48,7 +48,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
                     Footer = EmbedFooter
                 }]
             });
-            return null;
+            return;
         }
 
         var embed = BuildResponseEmbed(result);
@@ -57,12 +57,10 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             Embeds = [embed],
             Components = [FeedbackButtons]
         });
-
-        return null;
     }
 
     [MessageCommand("Ask qBitBot")]
-    public async Task<InteractionMessageProperties?> AskFromMessage(RestMessage message)
+    public async Task AskFromMessage(RestMessage message)
     {
         await RespondAsync(InteractionCallback.DeferredMessage());
 
@@ -80,7 +78,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             {
                 Content = "That message doesn't seem to have any text content to ask about."
             });
-            return null;
+            return;
         }
 
         var attachments = message.Attachments
@@ -96,7 +94,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             {
                 Content = "Something went wrong — couldn't get a response. Try again later."
             });
-            return null;
+            return;
         }
 
         if (!result.ShouldRespond)
@@ -114,7 +112,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
                     Footer = EmbedFooter
                 }]
             });
-            return null;
+            return;
         }
 
         var embed = BuildResponseEmbed(result);
@@ -123,8 +121,6 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             Embeds = [embed],
             Components = [FeedbackButtons]
         });
-
-        return null;
     }
 
     private static EmbedProperties BuildResponseEmbed(GeminiResponse result)
