@@ -27,7 +27,7 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
         - Lead with the root cause when obvious. Don't pad with generic steps that won't help.
           If unsolvable client-side (no seeders, dead tracker), say so plainly. Short honest > long unhelpful.
 
-        Context: messages formatted as "Name: text". Answer [Current question] or [Primary question];
+        Context: messages formatted as "[HH:mm] Name: text". Answer [Current question] or [Primary question];
         the rest is background.
         """;
 

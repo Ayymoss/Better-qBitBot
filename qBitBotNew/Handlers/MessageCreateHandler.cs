@@ -122,11 +122,11 @@ public sealed class MessageCreateHandler(
         if (anchorMessage is not null)
             excludeIds.Add(anchorMessage.Id);
 
-        // Include all non-bot messages within 2 days for full conversation context
+        // Include all non-bot messages within 12 hours for conversation context
         var channelMessages = recentMessages
             .Where(m => !m.Author.IsBot)
             .Where(m => !excludeIds.Contains(m.Id))
-            .Where(m => now - m.CreatedAt < TimeSpan.FromDays(2))
+            .Where(m => now - m.CreatedAt < TimeSpan.FromHours(12))
             .OrderBy(m => m.Id)
             .ToList();
 
@@ -139,13 +139,14 @@ public sealed class MessageCreateHandler(
 
         // Build context with recency labels
         var contextParts = new List<string>();
-        var recentThreshold = TimeSpan.FromHours(24);
+        var recentThreshold = TimeSpan.FromHours(2);
 
         // Always include the anchor message first if present (the replied-to message, regardless of age)
         if (anchorMessage is not null)
         {
             var name = GetDisplayName(anchorMessage.Author);
-            contextParts.Add($"[Primary question — this is the message the bot was invoked on]:\n{name}: {anchorMessage.Content}{(anchorMessage.Attachments.Any() ? " [has attached image]" : "")}");
+            var time = anchorMessage.CreatedAt.ToString("HH:mm");
+            contextParts.Add($"[Primary question — this is the message the bot was invoked on]:\n[{time}] {name}: {anchorMessage.Content}{(anchorMessage.Attachments.Any() ? " [has attached image]" : "")}");
         }
 
         var olderMessages = channelMessages.Where(m => now - m.CreatedAt >= recentThreshold).ToList();
@@ -157,17 +158,19 @@ public sealed class MessageCreateHandler(
             foreach (var m in olderMessages)
             {
                 var name = GetDisplayName(m.Author);
-                contextParts.Add($"{name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+                var time = m.CreatedAt.ToString("HH:mm");
+                contextParts.Add($"[{time}] {name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
             }
         }
 
         if (recentContextMessages.Count > 0)
         {
-            contextParts.Add("[Relevant context — within the last 24 hours]");
+            contextParts.Add("[Relevant context — within the last 2 hours]");
             foreach (var m in recentContextMessages)
             {
                 var name = GetDisplayName(m.Author);
-                contextParts.Add($"{name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
+                var time = m.CreatedAt.ToString("HH:mm");
+                contextParts.Add($"[{time}] {name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
             }
         }
 
@@ -178,7 +181,8 @@ public sealed class MessageCreateHandler(
         if (!string.IsNullOrWhiteSpace(invokerText))
         {
             var invokerName = GetDisplayName(invokingMessage.Author);
-            contextParts.Add($"[Current question — respond to THIS]:\n{invokerName}: {invokerText}");
+            var invokerTime = invokingMessage.CreatedAt.ToString("HH:mm");
+            contextParts.Add($"[Current question — respond to THIS]:\n[{invokerTime}] {invokerName}: {invokerText}");
         }
         else if (anchorMessage is null)
         {
