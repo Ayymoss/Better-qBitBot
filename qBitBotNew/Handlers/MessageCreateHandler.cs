@@ -19,7 +19,12 @@ public sealed class MessageCreateHandler(
     IOptions<BotConfig> config,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
-    private const string Footer = "\n-# This is a generated response. It may not be accurate.";
+    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "This is a generated response. It may not be accurate." };
+
+    private static readonly ActionRowProperties FeedbackButtons = new([
+        new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
+        new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger)
+    ]);
     public async ValueTask HandleAsync(Message message)
     {
         // Ignore bots and DMs
@@ -76,7 +81,25 @@ public sealed class MessageCreateHandler(
             return;
         }
 
-        var context = $"[Bot's previous response]\n{botMessage.Content}\n\n[User's follow-up]\n{message.Content}";
+        // Walk the reply chain to build full conversation history
+        var chain = new List<(string Role, string Content)>();
+        var current = botMessage as RestMessage;
+        while (current is not null)
+        {
+            var isBot = current.Author.Id == gatewayClient.Id;
+            var role = isBot ? "Bot" : GetDisplayName(current.Author);
+            // Bot messages use embeds; user messages use Content
+            var content = !string.IsNullOrEmpty(current.Content)
+                ? current.Content
+                : current.Embeds.FirstOrDefault()?.Description ?? "";
+            chain.Add((role, content));
+            current = current.ReferencedMessage;
+        }
+
+        chain.Reverse();
+        var history = string.Join("\n\n", chain.Select(c => $"[{c.Role}]\n{c.Content}"));
+        var userName = GetDisplayName(message.Author);
+        var context = $"{history}\n\n[{userName}'s follow-up — respond to THIS]\n{message.Content}";
         var attachments = ExtractAttachments(message);
 
         await RespondDirectly(message, context, attachments);
@@ -228,6 +251,7 @@ public sealed class MessageCreateHandler(
     {
         try
         {
+            using var typing = restClient.EnterTypingScope(message.ChannelId);
             var result = await geminiService.AskAsync(context, attachments);
 
             if (result is null)
@@ -244,20 +268,24 @@ public sealed class MessageCreateHandler(
 
                     await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
                     {
-                        Content = rejection + Footer,
+                        Embeds = [new EmbedProperties
+                        {
+                            Description = rejection,
+                            Color = new Color(158, 158, 158), // grey
+                            Footer = EmbedFooter
+                        }],
                         MessageReference = MessageReferenceProperties.Reply(message.Id)
                     });
                 }
                 return;
             }
 
-            var messages = FormatMessages(result);
-            for (var i = 0; i < messages.Count; i++)
+            var responseMessages = FormatEmbedResponse(result);
+            for (var i = 0; i < responseMessages.Count; i++)
             {
-                var props = new MessageProperties { Content = messages[i] };
                 if (i == 0)
-                    props.MessageReference = MessageReferenceProperties.Reply(message.Id);
-                await restClient.SendMessageAsync(message.ChannelId, props);
+                    responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
+                await restClient.SendMessageAsync(message.ChannelId, responseMessages[i]);
             }
         }
         catch (Exception ex)
@@ -307,50 +335,66 @@ public sealed class MessageCreateHandler(
         }
     }
 
-    private static List<string> FormatMessages(GeminiResponse result)
+    private static List<MessageProperties> FormatEmbedResponse(GeminiResponse result)
     {
-        // Fix double-escaped newlines from Gemini (literal \\n instead of \n)
         var text = result.Response.Replace("\\n", "\n");
 
         if (result.Confidence is "low")
-        {
             text = "I'm not entirely sure about this, but here are some resources that might help:";
-        }
 
         if (result.Resources is { Count: > 0 })
-        {
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
+
+        var color = result.Confidence switch
+        {
+            "high" => new Color(67, 160, 71),
+            "medium" => new Color(251, 192, 45),
+            _ => new Color(255, 152, 0)
+        };
+
+        const int maxDescription = 4096;
+
+        if (text.Length <= maxDescription)
+        {
+            return [new MessageProperties
+            {
+                Embeds = [new EmbedProperties { Description = text, Color = color, Footer = EmbedFooter }],
+                Components = [FeedbackButtons]
+            }];
         }
 
-        return SplitForDiscord(text, Footer);
-    }
-
-    private static List<string> SplitForDiscord(string text, string footer)
-    {
-        const int maxLength = 2000;
-
-        if (text.Length + footer.Length <= maxLength)
-            return [text + footer];
-
-        var messages = new List<string>();
+        // Split into multiple embeds for very long responses
+        var messages = new List<MessageProperties>();
         var remaining = text;
 
         while (remaining.Length > 0)
         {
-            if (remaining.Length + footer.Length <= maxLength)
+            var isLast = remaining.Length <= maxDescription;
+            string chunk;
+
+            if (isLast)
             {
-                messages.Add(remaining + footer);
-                break;
+                chunk = remaining;
+                remaining = "";
+            }
+            else
+            {
+                var splitAt = remaining.LastIndexOf('\n', maxDescription - 1);
+                if (splitAt <= 0) splitAt = maxDescription;
+                chunk = remaining[..splitAt];
+                remaining = remaining[splitAt..].TrimStart('\n');
             }
 
-            // Find a good split point (last newline before the limit)
-            var searchFrom = Math.Min(remaining.Length - 1, maxLength - 1);
-            var splitAt = remaining.LastIndexOf('\n', searchFrom);
-            if (splitAt <= 0)
-                splitAt = maxLength;
+            var embed = new EmbedProperties { Description = chunk, Color = color };
+            var props = new MessageProperties { Embeds = [embed] };
 
-            messages.Add(remaining[..splitAt]);
-            remaining = remaining[splitAt..].TrimStart('\n');
+            if (isLast || remaining.Length == 0)
+            {
+                embed.Footer = EmbedFooter;
+                props.Components = [FeedbackButtons];
+            }
+
+            messages.Add(props);
         }
 
         return messages;
