@@ -38,6 +38,13 @@ try
         options.Intents = GatewayIntents.GuildMessages
                           | GatewayIntents.MessageContent
                           | GatewayIntents.GuildUsers;
+        options.Presence = new PresenceProperties(UserStatusType.Online)
+        {
+            Activities = [new UserActivityProperties("@mention, /qbit, or right-click a message", UserActivityType.Custom)
+            {
+                State = "@mention, /qbit, or right-click a message"
+            }]
+        };
     });
 
     // Application commands (slash commands, message commands)
