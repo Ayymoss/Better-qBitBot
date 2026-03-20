@@ -8,7 +8,7 @@ namespace qBitBotNew.Handlers;
 
 public sealed class QBitCommands(GeminiService geminiService) : ApplicationCommandModule<ApplicationCommandContext>
 {
-    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "This is a generated response. It may not be accurate." };
+    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "Generated response — please verify before applying." };
 
     private static readonly ActionRowProperties FeedbackButtons = new([
         new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),

@@ -15,7 +15,7 @@ public sealed class MessageCreateHandler(
     GatewayClient gatewayClient,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
-    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "This is a generated response. It may not be accurate." };
+    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "Generated response — please verify before applying." };
 
     private static readonly ActionRowProperties FeedbackButtons = new([
         new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
@@ -297,7 +297,7 @@ public sealed class MessageCreateHandler(
 
             var notice = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
             {
-                Content = $"You're on cooldown — try again in **{seconds}s**.",
+                Content = $"You're on cooldown — try again in **{seconds}s**.\nFor longer conversations, try [Gemini](<https://gemini.google.com/>) directly.",
                 MessageReference = MessageReferenceProperties.Reply(message.Id)
             });
 
