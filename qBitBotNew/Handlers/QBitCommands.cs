@@ -22,7 +22,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
         // Defer since Gemini takes a while
         await RespondAsync(InteractionCallback.DeferredMessage());
 
-        var result = await geminiService.AskAsync(question);
+        var result = await geminiService.AskAsync([new GeminiMessage("user", question)]);
 
         if (result is null)
         {
@@ -86,7 +86,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-        var result = await geminiService.AskAsync(question, attachments);
+        var result = await geminiService.AskAsync([new GeminiMessage("user", question)], attachments);
 
         if (result is null)
         {

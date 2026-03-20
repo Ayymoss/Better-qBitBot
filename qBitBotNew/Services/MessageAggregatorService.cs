@@ -100,7 +100,7 @@ public sealed class MessageAggregatorService(
         try
         {
             using var typing = restClient.EnterTypingScope(pending.ChannelId);
-            var result = await geminiService.AskAsync(combinedQuestion, pending.Attachments);
+            var result = await geminiService.AskAsync([new GeminiMessage("user", combinedQuestion)], pending.Attachments);
 
             if (result is null)
                 return;

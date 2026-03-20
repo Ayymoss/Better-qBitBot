@@ -62,67 +62,74 @@ public sealed class MessageCreateHandler(
 
     private async Task HandleReplyToBot(Message message, RestMessage botMessage)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id))
+        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await ReactWithCooldown(message);
+            await NotifyCooldown(message, remaining);
             return;
         }
 
-        // Walk the reply chain to build full conversation history
-        var chain = new List<(string Role, string Content)>();
+        // Walk the reply chain to build multi-turn conversation history
+        var chain = new List<(bool IsBot, string Content)>();
         var current = botMessage as RestMessage;
         while (current is not null)
         {
             var isBot = current.Author.Id == gatewayClient.Id;
-            var role = isBot ? "Bot" : GetDisplayName(current.Author);
             // Bot messages use embeds; user messages use Content
-            var content = !string.IsNullOrEmpty(current.Content)
-                ? current.Content
-                : current.Embeds.FirstOrDefault()?.Description ?? "";
-            chain.Add((role, content));
+            var content = isBot
+                ? current.Embeds.FirstOrDefault()?.Description ?? current.Content
+                : current.Content;
+            if (!string.IsNullOrEmpty(content))
+                chain.Add((isBot, content));
             current = current.ReferencedMessage;
         }
 
         chain.Reverse();
-        var history = string.Join("\n\n", chain.Select(c => $"[{c.Role}]\n{c.Content}"));
-        var userName = GetDisplayName(message.Author);
-        var context = $"{history}\n\n[{userName}'s follow-up — respond to THIS]\n{message.Content}";
-        var attachments = ExtractAttachments(message);
 
-        await RespondDirectly(message, context, attachments);
+        // Build proper multi-turn conversation for Gemini
+        var conversation = new List<GeminiMessage>();
+        foreach (var (isBot, content) in chain)
+            conversation.Add(new GeminiMessage(isBot ? "model" : "user", content));
+
+        // Add the current follow-up as the final user turn
+        conversation.Add(new GeminiMessage("user", message.Content));
+
+        var attachments = ExtractAttachments(message);
+        await RespondWithConversation(message, conversation, attachments);
     }
 
     private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id))
+        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await ReactWithCooldown(message);
+            await NotifyCooldown(message, remaining);
             return;
         }
 
         // Gather context from the target user's messages, always including the replied-to message
-        var (context, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage);
+        var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage);
 
-        await RespondDirectly(message, context, attachments);
+        await RespondWithConversation(message, conversation, attachments);
     }
 
     private async Task HandleDirectMention(Message message)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id))
+        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await ReactWithCooldown(message);
+            await NotifyCooldown(message, remaining);
             return;
         }
 
         // Gather context from the invoking user's messages only
-        var (context, attachments) = await GatherUserContext(message, message.Author.Id);
+        var (conversation, attachments) = await GatherUserContext(message, message.Author.Id);
 
-        await RespondDirectly(message, context, attachments);
+        await RespondWithConversation(message, conversation, attachments);
     }
 
-    private async Task<(string Context, List<AttachmentInfo> Attachments)> GatherUserContext(
+    private async Task<(List<GeminiMessage> Conversation, List<AttachmentInfo> Attachments)> GatherUserContext(
         Message invokingMessage, ulong contextUserId, RestMessage? anchorMessage = null)
     {
+        var botUserId = gatewayClient.Id;
+
         // Fetch recent channel messages
         var recentMessages = await restClient.GetMessagesAroundAsync(invokingMessage.ChannelId, invokingMessage.Id, 50);
         var now = DateTimeOffset.UtcNow;
@@ -132,9 +139,8 @@ public sealed class MessageCreateHandler(
         if (anchorMessage is not null)
             excludeIds.Add(anchorMessage.Id);
 
-        // Include all non-bot messages within 12 hours for conversation context
+        // Include all messages within 12 hours for conversation context (including bot messages)
         var channelMessages = recentMessages
-            .Where(m => !m.Author.IsBot)
             .Where(m => !excludeIds.Contains(m.Id))
             .Where(m => now - m.CreatedAt < TimeSpan.FromHours(12))
             .OrderBy(m => m.Id)
@@ -147,7 +153,7 @@ public sealed class MessageCreateHandler(
         foreach (var m in channelMessages.Where(m => m.Author.Id == contextUserId))
             attachments.AddRange(ExtractAttachments(m));
 
-        // Build context with recency labels
+        // Build background context string
         var contextParts = new List<string>();
         var recentThreshold = TimeSpan.FromHours(2);
 
@@ -166,51 +172,69 @@ public sealed class MessageCreateHandler(
         {
             contextParts.Add("[Older context — for background only]");
             foreach (var m in olderMessages)
-            {
-                var name = GetDisplayName(m.Author);
-                var time = m.CreatedAt.ToString("HH:mm");
-                contextParts.Add($"[{time}] {name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
-            }
+                contextParts.Add(FormatContextMessage(m, botUserId));
         }
 
         if (recentContextMessages.Count > 0)
         {
             contextParts.Add("[Relevant context — within the last 2 hours]");
             foreach (var m in recentContextMessages)
-            {
-                var name = GetDisplayName(m.Author);
-                var time = m.CreatedAt.ToString("HH:mm");
-                contextParts.Add($"[{time}] {name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}");
-            }
+                contextParts.Add(FormatContextMessage(m, botUserId));
+        }
+
+        // Build the conversation as: background context (user) → ack (model) → current question (user)
+        var conversation = new List<GeminiMessage>();
+
+        if (contextParts.Count > 0)
+        {
+            conversation.Add(new GeminiMessage("user", string.Join("\n", contextParts)));
+            conversation.Add(new GeminiMessage("model", "Understood. I've read the conversation context. What's the question?"));
         }
 
         // Handle the invoking message itself
-        var botMention = $"<@{gatewayClient.Id}>";
+        var botMention = $"<@{botUserId}>";
         var invokerText = invokingMessage.Content.Replace(botMention, "").Trim();
 
         if (!string.IsNullOrWhiteSpace(invokerText))
         {
             var invokerName = GetDisplayName(invokingMessage.Author);
             var invokerTime = invokingMessage.CreatedAt.ToString("HH:mm");
-            contextParts.Add($"[Current question — respond to THIS]:\n[{invokerTime}] {invokerName}: {invokerText}");
+            conversation.Add(new GeminiMessage("user", $"[{invokerTime}] {invokerName}: {invokerText}"));
         }
-        else if (anchorMessage is null)
+        else if (anchorMessage is not null)
         {
-            contextParts.Add("[The bot was invoked — answer based on the user's recent messages above and any attached images]");
+            conversation.Add(new GeminiMessage("user", "Answer the primary question from the context above."));
+        }
+        else
+        {
+            conversation.Add(new GeminiMessage("user", "Answer based on the user's recent messages and any attached images."));
         }
 
-        return (string.Join("\n", contextParts), attachments);
+        return (conversation, attachments);
+    }
+
+    private string FormatContextMessage(RestMessage m, ulong botUserId)
+    {
+        var time = m.CreatedAt.ToString("HH:mm");
+        if (m.Author.Id == botUserId)
+        {
+            // Bot messages store their response in embed descriptions
+            var content = m.Embeds.FirstOrDefault()?.Description ?? m.Content;
+            return $"[{time}] qBitBot (you): {content}";
+        }
+        var name = GetDisplayName(m.Author);
+        return $"[{time}] {name}: {m.Content}{(m.Attachments.Any() ? " [has attached image]" : "")}";
     }
 
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
 
-    private async Task RespondDirectly(Message message, string context, List<AttachmentInfo> attachments, bool isDirectInvocation = true)
+    private async Task RespondWithConversation(Message message, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true)
     {
         try
         {
             using var typing = restClient.EnterTypingScope(message.ChannelId);
-            var result = await geminiService.AskAsync(context, attachments);
+            var result = await geminiService.AskAsync(conversation, attachments);
 
             if (result is null)
                 return;
@@ -262,15 +286,44 @@ public sealed class MessageCreateHandler(
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-    private async Task ReactWithCooldown(Message message)
+    private async Task NotifyCooldown(Message message, TimeSpan remaining)
     {
         try
         {
+            var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+
+            // Add hourglass reaction and send a visible cooldown notice
             await restClient.AddMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"));
+
+            var notice = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+            {
+                Content = $"You're on cooldown — try again in **{seconds}s**.",
+                MessageReference = MessageReferenceProperties.Reply(message.Id)
+            });
+
+            // Delete the notice after 5s, then remove the reaction once the cooldown expires
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5));
+                    await restClient.DeleteMessageAsync(message.ChannelId, notice.Id);
+
+                    var reactionDelay = remaining - TimeSpan.FromSeconds(5);
+                    if (reactionDelay > TimeSpan.Zero)
+                        await Task.Delay(reactionDelay);
+
+                    await restClient.DeleteCurrentUserMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to clean up cooldown notification");
+                }
+            });
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to add cooldown reaction");
+            logger.LogWarning(ex, "Failed to send cooldown notification");
         }
     }
 
