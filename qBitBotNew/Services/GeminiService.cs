@@ -7,7 +7,7 @@ using qBitBotNew.Models;
 
 namespace qBitBotNew.Services;
 
-public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> config, ILogger<GeminiService> logger)
+public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> geminiConfig, IOptions<BotConfig> botConfig, ILogger<GeminiService> logger)
 {
     private const string SystemPrompt = """
         You are a qBitTorrent support assistant in a Discord server. ONLY answer qBitTorrent Desktop client, WebUI, and API questions.
@@ -79,7 +79,8 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
 
     public async Task<GeminiResponse?> AskAsync(List<GeminiMessage> conversation, List<AttachmentInfo>? attachments = null)
     {
-        var cfg = config.Value;
+        var cfg = geminiConfig.Value;
+        var maxAttachmentBytes = botConfig.Value.MaxAttachmentBytes;
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{cfg.Model}:generateContent?key={cfg.ApiKey}";
 
         logger.LogDebug("Gemini request — {TurnCount} turn(s), last: {LastMessage}",
@@ -112,6 +113,15 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
                     try
                     {
                         var imageBytes = await httpClient.GetByteArrayAsync(attachment.Url);
+
+                        if (imageBytes.Length > maxAttachmentBytes)
+                        {
+                            imagesSkipped++;
+                            logger.LogWarning("Skipping oversized attachment: {Size} bytes exceeds {Max} byte limit — {Url}",
+                                imageBytes.Length, maxAttachmentBytes, attachment.Url);
+                            continue;
+                        }
+
                         var base64 = Convert.ToBase64String(imageBytes);
                         parts.Add(new
                         {
@@ -171,7 +181,16 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
 
             logger.LogDebug("Gemini raw response: {RawJson}", text);
 
-            var result = JsonSerializer.Deserialize<GeminiResponse>(text);
+            GeminiResponse? result;
+            try
+            {
+                result = JsonSerializer.Deserialize<GeminiResponse>(text);
+            }
+            catch (JsonException jsonEx)
+            {
+                logger.LogError(jsonEx, "Failed to deserialize Gemini response: {RawJson}", text);
+                return null;
+            }
 
             if (result is not null)
             {

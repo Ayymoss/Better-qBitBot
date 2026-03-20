@@ -1,8 +1,11 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
 using NetCord.Rest;
+using qBitBotNew.Config;
+using qBitBotNew.Helpers;
 using qBitBotNew.Models;
 using qBitBotNew.Services;
 
@@ -13,14 +16,9 @@ public sealed class MessageCreateHandler(
     RateLimiterService rateLimiterService,
     RestClient restClient,
     GatewayClient gatewayClient,
+    IOptions<BotConfig> botConfig,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
-    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "Generated response — please verify before applying." };
-
-    private static readonly ActionRowProperties FeedbackButtons = new([
-        new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
-        new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger)
-    ]);
     public async ValueTask HandleAsync(Message message)
     {
         // Ignore bots and DMs
@@ -254,7 +252,7 @@ public sealed class MessageCreateHandler(
                         {
                             Description = rejection,
                             Color = new Color(158, 158, 158), // grey
-                            Footer = EmbedFooter
+                            Footer = EmbedResponseFormatter.Footer
                         }],
                         MessageReference = MessageReferenceProperties.Reply(message.Id)
                     });
@@ -262,7 +260,7 @@ public sealed class MessageCreateHandler(
                 return;
             }
 
-            var responseMessages = FormatEmbedResponse(result);
+            var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(result);
             for (var i = 0; i < responseMessages.Count; i++)
             {
                 if (i == 0)
@@ -301,29 +299,46 @@ public sealed class MessageCreateHandler(
                 MessageReference = MessageReferenceProperties.Reply(message.Id)
             });
 
-            // Delete the notice after 5s, then remove the reaction once the cooldown expires
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(5));
-                    await restClient.DeleteMessageAsync(message.ChannelId, notice.Id);
-
-                    var reactionDelay = remaining - TimeSpan.FromSeconds(5);
-                    if (reactionDelay > TimeSpan.Zero)
-                        await Task.Delay(reactionDelay);
-
-                    await restClient.DeleteCurrentUserMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"));
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to clean up cooldown notification");
-                }
-            });
+            // Clean up the notice and reaction on a background task
+            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to send cooldown notification");
+        }
+    }
+
+    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+
+            try
+            {
+                await restClient.DeleteMessageAsync(channelId, noticeId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete cooldown notice message");
+            }
+
+            var reactionDelay = remaining - TimeSpan.FromSeconds(5);
+            if (reactionDelay > TimeSpan.Zero)
+                await Task.Delay(reactionDelay);
+
+            try
+            {
+                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"));
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to remove cooldown reaction");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Cooldown cleanup failed unexpectedly");
         }
     }
 
@@ -333,10 +348,11 @@ public sealed class MessageCreateHandler(
         {
             var topFrame = ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim() ?? "unknown";
             var errorInfo = $"`{ex.GetType().Name}: {topFrame}`";
+            var contact = botConfig.Value.ErrorContactHandle;
 
             await restClient.SendMessageAsync(channelId, new MessageProperties
             {
-                Content = $"Something went wrong while processing your request ({context}). Please ping @ayymoss if this keeps happening.\n-# {errorInfo}",
+                Content = $"Something went wrong while processing your request ({context}). Please ping {contact} if this keeps happening.\n-# {errorInfo}",
                 MessageReference = MessageReferenceProperties.Reply(replyToMessageId)
             });
         }
@@ -346,68 +362,4 @@ public sealed class MessageCreateHandler(
         }
     }
 
-    private static List<MessageProperties> FormatEmbedResponse(GeminiResponse result)
-    {
-        var text = result.Response.Replace("\\n", "\n");
-
-        if (result.Confidence is "low")
-            text = "I'm not entirely sure about this, but here are some resources that might help:";
-
-        if (result.Resources is { Count: > 0 })
-            text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
-
-        var color = result.Confidence switch
-        {
-            "high" => new Color(67, 160, 71),
-            "medium" => new Color(251, 192, 45),
-            _ => new Color(255, 152, 0)
-        };
-
-        const int maxDescription = 4096;
-
-        if (text.Length <= maxDescription)
-        {
-            return [new MessageProperties
-            {
-                Embeds = [new EmbedProperties { Description = text, Color = color, Footer = EmbedFooter }],
-                Components = [FeedbackButtons]
-            }];
-        }
-
-        // Split into multiple embeds for very long responses
-        var messages = new List<MessageProperties>();
-        var remaining = text;
-
-        while (remaining.Length > 0)
-        {
-            var isLast = remaining.Length <= maxDescription;
-            string chunk;
-
-            if (isLast)
-            {
-                chunk = remaining;
-                remaining = "";
-            }
-            else
-            {
-                var splitAt = remaining.LastIndexOf('\n', maxDescription - 1);
-                if (splitAt <= 0) splitAt = maxDescription;
-                chunk = remaining[..splitAt];
-                remaining = remaining[splitAt..].TrimStart('\n');
-            }
-
-            var embed = new EmbedProperties { Description = chunk, Color = color };
-            var props = new MessageProperties { Embeds = [embed] };
-
-            if (isLast || remaining.Length == 0)
-            {
-                embed.Footer = EmbedFooter;
-                props.Components = [FeedbackButtons];
-            }
-
-            messages.Add(props);
-        }
-
-        return messages;
-    }
 }

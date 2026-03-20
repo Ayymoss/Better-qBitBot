@@ -8,4 +8,6 @@ RUN dotnet publish qBitBotNew/qBitBotNew.csproj -c Release -o /app
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview
 WORKDIR /app
 COPY --from=build /app .
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD pidof dotnet || exit 1
 ENTRYPOINT ["dotnet", "qBitBotNew.dll"]

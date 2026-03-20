@@ -1,6 +1,7 @@
 using NetCord;
 using NetCord.Rest;
 using NetCord.Services.ApplicationCommands;
+using qBitBotNew.Helpers;
 using qBitBotNew.Models;
 using qBitBotNew.Services;
 
@@ -8,12 +9,6 @@ namespace qBitBotNew.Handlers;
 
 public sealed class QBitCommands(GeminiService geminiService) : ApplicationCommandModule<ApplicationCommandContext>
 {
-    private static readonly EmbedFooterProperties EmbedFooter = new() { Text = "Generated response — please verify before applying." };
-
-    private static readonly ActionRowProperties FeedbackButtons = new([
-        new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
-        new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger)
-    ]);
 
     [SlashCommand("qbit", "Ask a qBitTorrent question")]
     public async Task Ask(
@@ -45,17 +40,17 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
                 {
                     Description = rejection,
                     Color = new Color(158, 158, 158),
-                    Footer = EmbedFooter
+                    Footer = EmbedResponseFormatter.Footer
                 }]
             });
             return;
         }
 
-        var embed = BuildResponseEmbed(result);
+        var embed = EmbedResponseFormatter.BuildSingleEmbed(result);
         await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],
-            Components = [FeedbackButtons]
+            Components = [EmbedResponseFormatter.FeedbackButtons]
         });
     }
 
@@ -109,42 +104,17 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
                 {
                     Description = rejection,
                     Color = new Color(158, 158, 158),
-                    Footer = EmbedFooter
+                    Footer = EmbedResponseFormatter.Footer
                 }]
             });
             return;
         }
 
-        var embed = BuildResponseEmbed(result);
+        var embed = EmbedResponseFormatter.BuildSingleEmbed(result);
         await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],
-            Components = [FeedbackButtons]
+            Components = [EmbedResponseFormatter.FeedbackButtons]
         });
-    }
-
-    private static EmbedProperties BuildResponseEmbed(GeminiResponse result)
-    {
-        var text = result.Response.Replace("\\n", "\n");
-
-        if (result.Confidence is "low")
-            text = "I'm not entirely sure about this, but here are some resources that might help:";
-
-        if (result.Resources is { Count: > 0 })
-            text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
-
-        var color = result.Confidence switch
-        {
-            "high" => new Color(67, 160, 71),
-            "medium" => new Color(251, 192, 45),
-            _ => new Color(255, 152, 0)
-        };
-
-        return new EmbedProperties
-        {
-            Description = text.Length > 4096 ? text[..4093] + "..." : text,
-            Color = color,
-            Footer = EmbedFooter
-        };
     }
 }
