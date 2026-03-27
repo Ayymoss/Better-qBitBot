@@ -32,6 +32,10 @@ public static class EmbedResponseFormatter
         if (result.Resources is { Count: > 0 })
             text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
 
+        if (result.FollowUpQuestions is { Count: > 0 })
+            text += "\n\n**To help further, please share:**\n"
+                  + string.Join("\n", result.FollowUpQuestions.Select(q => $"- {q}"));
+
         return text;
     }
 

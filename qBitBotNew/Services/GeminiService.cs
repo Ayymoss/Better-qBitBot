@@ -21,11 +21,15 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
 
         ## Response rules
         - Low confidence: provide resource links, don't guess. Medium: answer + include resources.
-        - Be brief and direct. 2-4 short paragraphs or a list, under 1500 chars. No preamble, no
-          restating the problem. Answer, then stop.
+        - Be brief and direct. Under 2000 chars. No preamble, no restating the problem.
         - Use Discord markdown (bold, lists, \n for line breaks in JSON). Don't single-line everything.
-        - Lead with the root cause when obvious. Don't pad with generic steps that won't help.
-          If unsolvable client-side (no seeders, dead tracker), say so plainly. Short honest > long unhelpful.
+        - If unsolvable client-side, say so plainly. Short honest > long unhelpful.
+        - If you identify a root cause that makes other steps irrelevant, lead with it directly.
+          Don't soften it, bury it as a footnote, or pad around it with generic advice.
+        - If your answer would meaningfully change depending on details you don't have, use the
+          follow_up_questions field to ask. Be specific to what the user is describing — don't
+          run through a generic checklist. You may still give a partial or conditional answer alongside.
+        - On follow-up turns, don't re-ask what the user already told you.
 
         ## Conversation context
         - You may receive multi-turn conversation history. Your previous responses appear as "model" turns.
@@ -72,9 +76,15 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
             {
                 type = "string",
                 description = "Brief internal reasoning for your classification and response. Explain: what you understood the question to be, why you chose the intent, whether any attached images influenced your answer, and why you chose this confidence level."
+            },
+            follow_up_questions = new
+            {
+                type = "array",
+                items = new { type = "string" },
+                description = "Specific questions to ask the user when critical environment details are missing for troubleshooting. Empty when the answer is complete or the question is simple."
             }
         },
-        required = new[] { "intent", "confidence", "response", "resources", "reasoning" }
+        required = new[] { "intent", "confidence", "response", "resources", "reasoning", "follow_up_questions" }
     };
 
     public async Task<GeminiResponse?> AskAsync(List<GeminiMessage> conversation, List<AttachmentInfo>? attachments = null)

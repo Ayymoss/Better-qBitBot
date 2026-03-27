@@ -32,6 +32,9 @@ public sealed class GeminiResponse
     [JsonPropertyName("reasoning")]
     public string Reasoning { get; set; } = string.Empty;
 
+    [JsonPropertyName("follow_up_questions")]
+    public List<string> FollowUpQuestions { get; set; } = [];
+
     public bool ShouldRespond => Intent is "on_topic";
     public bool IsPiracy => Intent is "piracy";
     public bool IsOffTopic => Intent is "off_topic";
