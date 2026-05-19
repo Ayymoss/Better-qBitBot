@@ -10,8 +10,20 @@ namespace qBitBotNew.Handlers;
 public sealed class QBitCommands(
     GeminiService geminiService,
     FeedbackService feedbackService,
-    RateLimiterService rateLimiterService) : ApplicationCommandModule<ApplicationCommandContext>
+    RateLimiterService rateLimiterService,
+    RestClient restClient) : ApplicationCommandModule<ApplicationCommandContext>
 {
+    private static string BuildThreadName(string question)
+    {
+        var trimmed = question.Replace('\n', ' ').Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return "qBitBot question";
+        return trimmed.Length <= 80 ? trimmed : trimmed[..77] + "...";
+    }
+
+    private static string TruncateForPlaceholder(string text, int max) =>
+        text.Length <= max ? text : text[..(max - 1)] + "…";
+
     private static InteractionMessageProperties BudgetExceededMessage(BudgetCheck budget)
     {
         var resetIn = budget.ResetAt.HasValue
@@ -169,7 +181,7 @@ public sealed class QBitCommands(
             return;
         }
 
-        // Defer since Gemini takes a while
+        // Defer (visible). Gemini takes ~10s.
         await RespondAsync(InteractionCallback.DeferredMessage());
 
         var result = await geminiService.AskAsync([new GeminiMessage("user", question)]);
@@ -178,7 +190,8 @@ public sealed class QBitCommands(
         {
             await FollowupAsync(new InteractionMessageProperties
             {
-                Content = "Something went wrong — couldn't get a response. Try again later."
+                Content = "Something went wrong — couldn't get a response. Try again later.",
+                Flags = MessageFlags.Ephemeral
             });
             return;
         }
@@ -187,6 +200,7 @@ public sealed class QBitCommands(
 
         if (!geminiResponse.ShouldRespond)
         {
+            // Send rejection as ephemeral so it doesn't clutter the channel or create an empty thread.
             var rejection = geminiResponse.IsPiracy
                 ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                 : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
@@ -198,7 +212,8 @@ public sealed class QBitCommands(
                     Description = rejection,
                     Color = new Color(158, 158, 158),
                     Footer = EmbedResponseFormatter.Footer
-                }]
+                }],
+                Flags = MessageFlags.Ephemeral
             });
             await feedbackService.RecordResponseAsync(
                 geminiResponse, question, rejectionSent.Id,
@@ -206,20 +221,57 @@ public sealed class QBitCommands(
             return;
         }
 
-        var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
-        var sent = await FollowupAsync(new InteractionMessageProperties
+        // If already inside a thread, post the answer directly there (Discord disallows
+        // thread-in-thread). Otherwise drop a public "asked by" anchor in the channel and
+        // spawn a thread on it so the answer doesn't clutter the parent channel.
+        var responseChannelId = Context.Channel.Id;
+        if (Context.Channel is not GuildThread)
         {
-            Embeds = [embed],
-            Components = [EmbedResponseFormatter.FeedbackButtons]
-        });
+            var placeholder = await FollowupAsync(new InteractionMessageProperties
+            {
+                Content = $"**<@{Context.User.Id}> asked:** {TruncateForPlaceholder(question, 200)}"
+            });
 
-        await feedbackService.RecordResponseAsync(
-            geminiResponse,
-            question,
-            sent.Id,
-            Context.Channel.Id,
-            Context.User.Id,
-            Context.Guild?.Id);
+            try
+            {
+                var thread = await restClient.CreateGuildThreadAsync(
+                    Context.Channel.Id, placeholder.Id,
+                    new GuildThreadFromMessageProperties(BuildThreadName(question)));
+                responseChannelId = thread.Id;
+            }
+            catch
+            {
+                // Fall back to posting the answer in the parent channel as another followup.
+            }
+        }
+
+        var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
+        RestMessage? lastSent = null;
+        foreach (var msgProps in responseMessages)
+        {
+            // If we're still in the original interaction channel (no thread spawned), use
+            // FollowupAsync so the answer attaches to the interaction. Otherwise post directly
+            // into the spawned thread via the rest client.
+            if (responseChannelId == Context.Channel.Id)
+                lastSent = await FollowupAsync(new InteractionMessageProperties
+                {
+                    Embeds = msgProps.Embeds,
+                    Components = msgProps.Components
+                });
+            else
+                lastSent = await restClient.SendMessageAsync(responseChannelId, msgProps);
+        }
+
+        if (lastSent is not null)
+        {
+            await feedbackService.RecordResponseAsync(
+                geminiResponse,
+                question,
+                lastSent.Id,
+                responseChannelId,
+                Context.User.Id,
+                Context.Guild?.Id);
+        }
     }
 
     [MessageCommand("Ask qBitBot")]

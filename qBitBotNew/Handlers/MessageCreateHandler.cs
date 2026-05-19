@@ -59,8 +59,20 @@ public sealed partial class MessageCreateHandler(
             return;
         }
 
+        // Auto-reply inside a thread the bot has previously responded in. Threads spawned
+        // by an earlier invocation are purpose-built for a conversation, so we treat every
+        // user message there as a direct question without needing the @mention.
+        if (IsThreadChannel(message)
+            && await feedbackService.HasBotRespondedInChannelAsync(message.ChannelId, ct))
+        {
+            await HandleDirectMention(message, ct);
+            return;
+        }
+
         // No auto-response — bot only responds when explicitly invoked
     }
+
+    private static bool IsThreadChannel(Message message) => message.Channel is GuildThread;
 
     private async Task HandleReplyToBot(Message message, RestMessage botMessage, CancellationToken ct = default)
     {
@@ -100,7 +112,9 @@ public sealed partial class MessageCreateHandler(
         conversation.Add(new GeminiMessage("user", followUpText));
 
         var attachments = ExtractAttachments(message);
-        await RespondWithConversation(message, conversation, attachments, ct: ct);
+        // Reply-to-bot stays in-place: continuation of an existing conversation, no thread spawn.
+        // If the bot's previous message was inside a thread, message.ChannelId already is that thread.
+        await RespondWithConversation(message, message.ChannelId, conversation, attachments, ct: ct);
     }
 
     private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage, CancellationToken ct = default)
@@ -115,7 +129,8 @@ public sealed partial class MessageCreateHandler(
         // Gather context from the target user's messages, always including the replied-to message
         var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
 
-        await RespondWithConversation(message, conversation, attachments, ct: ct);
+        var responseChannelId = await EnsureThreadAsync(message, ct);
+        await RespondWithConversation(message, responseChannelId, conversation, attachments, ct: ct);
     }
 
     private async Task HandleDirectMention(Message message, CancellationToken ct = default)
@@ -130,7 +145,53 @@ public sealed partial class MessageCreateHandler(
         // Gather context from the invoking user's messages only
         var (conversation, attachments) = await GatherUserContext(message, message.Author.Id, ct: ct);
 
-        await RespondWithConversation(message, conversation, attachments, ct: ct);
+        var responseChannelId = await EnsureThreadAsync(message, ct);
+        await RespondWithConversation(message, responseChannelId, conversation, attachments, ct: ct);
+    }
+
+    // Returns the channel id the bot should post into. If the invoking message is in a
+    // regular text channel, a thread is spawned on the user's message and that thread's id
+    // is returned. If already inside a thread (or a forum/voice channel where threads don't
+    // apply), the original channel id is returned. Thread name is derived from the user's
+    // question, truncated to fit Discord's 100-char limit.
+    private async Task<ulong> EnsureThreadAsync(Message message, CancellationToken ct)
+    {
+        if (IsThreadChannel(message))
+            return message.ChannelId;
+
+        // GuildThread inherits from TextGuildChannel, but the IsThreadChannel guard above
+        // already filtered those. Anything that isn't a regular text/announcement channel
+        // (DM, voice, forum, category) is left alone.
+        if (message.Channel is not TextGuildChannel)
+            return message.ChannelId;
+
+        try
+        {
+            var botMention = $"<@{gatewayClient.Id}>";
+            var stripped = message.Content.Replace(botMention, "").Trim();
+            var threadName = BuildThreadName(stripped);
+            var thread = await restClient.CreateGuildThreadAsync(
+                message.ChannelId,
+                message.Id,
+                new GuildThreadFromMessageProperties(threadName),
+                cancellationToken: ct);
+            return thread.Id;
+        }
+        catch (Exception ex)
+        {
+            // If thread creation fails (permissions, archived, etc.), fall back to replying
+            // in the parent channel rather than dropping the user's question on the floor.
+            LogThreadCreationFailed(ex, message.ChannelId);
+            return message.ChannelId;
+        }
+    }
+
+    private static string BuildThreadName(string question)
+    {
+        var trimmed = question.Replace('\n', ' ').Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return "qBitBot question";
+        return trimmed.Length <= 80 ? trimmed : trimmed[..77] + "...";
     }
 
     private async Task<(List<GeminiMessage> Conversation, List<AttachmentInfo> Attachments)> GatherUserContext(
@@ -237,11 +298,11 @@ public sealed partial class MessageCreateHandler(
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
 
-    private async Task RespondWithConversation(Message message, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true, CancellationToken ct = default)
+    private async Task RespondWithConversation(Message message, ulong targetChannelId, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true, CancellationToken ct = default)
     {
         try
         {
-            using var typing = restClient.EnterTypingScope(message.ChannelId);
+            using var typing = restClient.EnterTypingScope(targetChannelId);
             var result = await geminiService.AskAsync(conversation, attachments, ct);
 
             if (result.IsFailure || result.Value is null)
@@ -249,6 +310,9 @@ public sealed partial class MessageCreateHandler(
 
             var geminiResponse = result.Value;
             var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
+            // Reply references only work inside the same channel as the original message.
+            // When responding inside a spawned thread, the thread itself anchors the conversation.
+            var sameChannel = targetChannelId == message.ChannelId;
 
             // For direct invocations (@mention / reply-to), give feedback on why we can't help.
             // Rejections are still persisted so they count toward the daily turn budget.
@@ -260,20 +324,23 @@ public sealed partial class MessageCreateHandler(
                         ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                         : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
-                    var rejectionMsg = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+                    var rejectionProps = new MessageProperties
                     {
                         Embeds = [new EmbedProperties
                         {
                             Description = rejection,
                             Color = new Color(158, 158, 158), // grey
                             Footer = EmbedResponseFormatter.Footer
-                        }],
-                        MessageReference = MessageReferenceProperties.Reply(message.Id)
-                    }, null, ct);
+                        }]
+                    };
+                    if (sameChannel)
+                        rejectionProps.MessageReference = MessageReferenceProperties.Reply(message.Id);
+
+                    var rejectionMsg = await restClient.SendMessageAsync(targetChannelId, rejectionProps, null, ct);
 
                     await feedbackService.RecordResponseAsync(
                         geminiResponse, prompt, rejectionMsg.Id,
-                        message.ChannelId, message.Author.Id, message.GuildId, ct);
+                        targetChannelId, message.Author.Id, message.GuildId, ct);
                 }
                 return;
             }
@@ -282,20 +349,21 @@ public sealed partial class MessageCreateHandler(
             RestMessage? lastSent = null;
             for (var i = 0; i < responseMessages.Count; i++)
             {
-                if (i == 0)
+                if (i == 0 && sameChannel)
                     responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
-                lastSent = await restClient.SendMessageAsync(message.ChannelId, responseMessages[i], null, ct);
+                lastSent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
             }
 
             // Buttons live on the LAST message of the response — persist that one's ID so
-            // FeedbackButtonHandler can look up the row when the user clicks.
+            // FeedbackButtonHandler can look up the row when the user clicks. ChannelId is
+            // the target (thread or parent) so HasBotRespondedInChannelAsync can find it.
             if (lastSent is not null)
             {
                 await feedbackService.RecordResponseAsync(
                     geminiResponse,
                     prompt,
                     lastSent.Id,
-                    message.ChannelId,
+                    targetChannelId,
                     message.Author.Id,
                     message.GuildId,
                     ct);
@@ -367,6 +435,9 @@ public sealed partial class MessageCreateHandler(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send budget-exceeded notification")]
     private partial void LogBudgetNotificationFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to create thread in channel {ChannelId} — falling back to in-channel reply")]
+    private partial void LogThreadCreationFailed(Exception ex, ulong channelId);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to send error reply")]
     private partial void LogErrorReplyFailed(Exception ex);

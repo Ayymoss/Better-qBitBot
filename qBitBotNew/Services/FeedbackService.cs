@@ -112,6 +112,15 @@ public sealed partial class FeedbackService(
             lowPrompts);
     }
 
+    // Used by the in-thread auto-reply path: if the bot has previously responded inside this
+    // channel id (which for threads is the thread's own id), treat the thread as a
+    // bot-managed conversation and reply without requiring @mention.
+    public async Task<bool> HasBotRespondedInChannelAsync(ulong channelId, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.Feedback.AnyAsync(f => f.ChannelId == channelId, ct);
+    }
+
     public async Task<string?> GetThoughtSummaryAsync(ulong botMessageId, CancellationToken ct = default)
     {
         try
