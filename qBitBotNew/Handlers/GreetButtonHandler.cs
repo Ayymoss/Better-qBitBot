@@ -181,25 +181,15 @@ public sealed class GreetButtonHandler(
             return;
         }
 
-        var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
-        ulong feedbackMessageId;
-        var first = responseMessages[0];
+        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
         await restClient.ModifyMessageAsync(responseChannelId, placeholder.Id, opts =>
         {
-            opts.Embeds = first.Embeds;
-            opts.Components = responseMessages.Count == 1 ? first.Components : [];
+            opts.Embeds = embeds;
+            opts.Components = [EmbedResponseFormatter.FeedbackButtons];
         });
-        feedbackMessageId = placeholder.Id;
-
-        for (var i = 1; i < responseMessages.Count; i++)
-        {
-            var sent = await restClient.SendMessageAsync(responseChannelId, responseMessages[i]);
-            if (i == responseMessages.Count - 1)
-                feedbackMessageId = sent.Id;
-        }
 
         await feedbackService.RecordResponseAsync(
-            geminiResponse, prompt, feedbackMessageId, responseChannelId, userId, guildId);
+            geminiResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
     }
 
     private static string GetDisplayName(User author) =>

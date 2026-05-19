@@ -402,40 +402,32 @@ public sealed partial class MessageCreateHandler(
                 return;
             }
 
-            // On-topic: edit placeholder with first chunk; if multi-embed, send the rest as
-            // new messages. Buttons live on the LAST message; that's the one whose id is
-            // persisted so FeedbackButtonHandler / Why can look it up.
-            var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
+            // On-topic: assemble [answer..., questions?, resources?] embeds and post as a
+            // single message. Buttons attach to the message; the message id is persisted so
+            // FeedbackButtonHandler / Why can look it up.
+            var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
             ulong feedbackMessageId;
 
             if (placeholder is not null)
             {
-                var first = responseMessages[0];
                 await restClient.ModifyMessageAsync(targetChannelId, placeholder.Id, opts =>
                 {
-                    opts.Embeds = first.Embeds;
-                    opts.Components = responseMessages.Count == 1 ? first.Components : [];
+                    opts.Embeds = embeds;
+                    opts.Components = [EmbedResponseFormatter.FeedbackButtons];
                 }, null, ct);
                 feedbackMessageId = placeholder.Id;
-
-                for (var i = 1; i < responseMessages.Count; i++)
-                {
-                    var sent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
-                    if (i == responseMessages.Count - 1)
-                        feedbackMessageId = sent.Id;
-                }
             }
             else
             {
-                RestMessage? lastSent = null;
-                for (var i = 0; i < responseMessages.Count; i++)
+                var props = new MessageProperties
                 {
-                    if (i == 0 && sameChannel)
-                        responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
-                    lastSent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
-                }
-                if (lastSent is null) return;
-                feedbackMessageId = lastSent.Id;
+                    Embeds = embeds,
+                    Components = [EmbedResponseFormatter.FeedbackButtons]
+                };
+                if (sameChannel)
+                    props.MessageReference = MessageReferenceProperties.Reply(message.Id);
+                var sent = await restClient.SendMessageAsync(targetChannelId, props, null, ct);
+                feedbackMessageId = sent.Id;
             }
 
             await feedbackService.RecordResponseAsync(

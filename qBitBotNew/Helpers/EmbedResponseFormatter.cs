@@ -68,109 +68,86 @@ public static class EmbedResponseFormatter
         _ => new Color(229, 57, 53)                          // red — distinct from medium amber
     };
 
-    public static string BuildResponseText(GeminiResponse result)
+    private static readonly Color QuestionsColor = new(255, 152, 0);   // amber
+    private static readonly Color ResourcesColor = new(120, 144, 156); // blue-grey
+
+    /// <summary>
+    /// Builds the embed list for a single message: [answer..., questions?, resources?].
+    /// Answer is split across multiple embeds if it exceeds 4096 chars. Footer hint lands
+    /// on the LAST embed. Caller attaches FeedbackButtons to the message itself.
+    /// Total embeds always stays under Discord's 10-per-message limit.
+    /// </summary>
+    public static List<EmbedProperties> BuildEmbeds(GeminiResponse result)
     {
-        var text = result.Response.Replace("\\n", "\n");
+        var answerColor = GetConfidenceColor(result.Confidence);
 
-        if (result.Confidence is ConfidenceLevel.Low)
-            text = "I'm not entirely sure about this, but here are some resources that might help:";
+        var answerText = result.Confidence is ConfidenceLevel.Low
+            ? "I'm not entirely sure about this, but here are some resources that might help:"
+            : result.Response.Replace("\\n", "\n");
 
-        if (result.Resources is { Count: > 0 })
-            text += "\n\n**Resources:**\n" + string.Join("\n", result.Resources.Select(r => $"- <{r}>"));
+        List<EmbedProperties> embeds = [];
 
-        return text;
-    }
-
-    // Follow-up questions get their own embed field so they stand out — users were ignoring
-    // them when appended to the description paragraph.
-    public static EmbedFieldProperties? BuildFollowUpField(GeminiResponse result)
-    {
-        if (result.FollowUpQuestions is not { Count: > 0 } qs)
-            return null;
-
-        var value = string.Join("\n", qs.Select(q => $"- {q}"));
-        // Discord field value max is 1024 chars. Truncate defensively.
-        if (value.Length > 1024)
-            value = value[..1021] + "...";
-
-        return new EmbedFieldProperties
+        // Answer embeds — split at \n boundaries to stay under 4096. Cap at 8 to leave room
+        // for the questions + resources embeds.
+        foreach (var chunk in SplitForEmbed(answerText, MaxEmbedDescription).Take(8))
         {
-            Name = "To help further, please share:",
-            Value = value,
-            Inline = false
-        };
-    }
-
-    public static List<MessageProperties> FormatEmbedResponse(GeminiResponse result)
-    {
-        var text = BuildResponseText(result);
-        var color = GetConfidenceColor(result.Confidence);
-        var followUpField = BuildFollowUpField(result);
-
-        if (text.Length <= MaxEmbedDescription)
-        {
-            var embed = new EmbedProperties { Description = text, Color = color, Footer = BuildHintFooter() };
-            if (followUpField is not null)
-                embed.Fields = [followUpField];
-            return [new MessageProperties
-            {
-                Embeds = [embed],
-                Components = [FeedbackButtons]
-            }];
+            embeds.Add(new EmbedProperties { Description = chunk, Color = answerColor });
         }
 
-        List<MessageProperties> messages = [];
-        var remaining = text;
-
-        while (remaining.Length > 0)
+        // Questions embed — one field per question so each stands distinct.
+        if (result.FollowUpQuestions is { Count: > 0 } qs)
         {
-            var isLast = remaining.Length <= MaxEmbedDescription;
-            string chunk;
-
-            if (isLast)
+            var fields = qs.Select((q, i) => new EmbedFieldProperties
             {
-                chunk = remaining;
-                remaining = "";
-            }
-            else
+                Name = $"{i + 1}.",
+                Value = q.Length > 1024 ? q[..1021] + "..." : q,
+                Inline = false
+            }).Take(25).ToArray(); // Discord field cap is 25 per embed.
+
+            embeds.Add(new EmbedProperties
             {
-                var splitAt = remaining.LastIndexOf('\n', MaxEmbedDescription - 1);
-                if (splitAt <= 0) splitAt = MaxEmbedDescription;
-                chunk = remaining[..splitAt];
-                remaining = remaining[splitAt..].TrimStart('\n');
-            }
-
-            var embed = new EmbedProperties { Description = chunk, Color = color };
-            var props = new MessageProperties { Embeds = [embed] };
-
-            if (isLast || remaining.Length == 0)
-            {
-                embed.Footer = BuildHintFooter();
-                if (followUpField is not null)
-                    embed.Fields = [followUpField];
-                props.Components = [FeedbackButtons];
-            }
-
-            messages.Add(props);
+                Title = "❓ To help further, please share",
+                Color = QuestionsColor,
+                Fields = fields
+            });
         }
 
-        return messages;
+        // Resources embed.
+        if (result.Resources is { Count: > 0 } resources)
+        {
+            var body = string.Join("\n", resources.Select(r => $"- <{r}>"));
+            if (body.Length > MaxEmbedDescription)
+                body = body[..(MaxEmbedDescription - 4)] + "\n...";
+
+            embeds.Add(new EmbedProperties
+            {
+                Title = "📚 Resources",
+                Color = ResourcesColor,
+                Description = body
+            });
+        }
+
+        // Hint footer on the last embed.
+        embeds[^1].Footer = BuildHintFooter();
+        return embeds;
     }
 
-    public static EmbedProperties BuildSingleEmbed(GeminiResponse result)
+    private static IEnumerable<string> SplitForEmbed(string text, int limit)
     {
-        var text = BuildResponseText(result);
-        var color = GetConfidenceColor(result.Confidence);
-        var followUpField = BuildFollowUpField(result);
-
-        var embed = new EmbedProperties
+        if (string.IsNullOrEmpty(text))
         {
-            Description = text.Length > MaxEmbedDescription ? text[..4093] + "..." : text,
-            Color = color,
-            Footer = BuildHintFooter()
-        };
-        if (followUpField is not null)
-            embed.Fields = [followUpField];
-        return embed;
+            yield return "_(empty response)_";
+            yield break;
+        }
+
+        while (text.Length > limit)
+        {
+            var splitAt = text.LastIndexOf('\n', limit - 1);
+            if (splitAt <= 0) splitAt = limit;
+            yield return text[..splitAt];
+            text = text[splitAt..].TrimStart('\n');
+        }
+        if (text.Length > 0)
+            yield return text;
     }
 }

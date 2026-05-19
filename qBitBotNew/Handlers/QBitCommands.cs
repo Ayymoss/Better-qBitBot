@@ -245,33 +245,28 @@ public sealed class QBitCommands(
             }
         }
 
-        var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
-        RestMessage? lastSent = null;
-        foreach (var msgProps in responseMessages)
+        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+        RestMessage sent;
+        if (responseChannelId == Context.Channel.Id)
         {
-            // If we're still in the original interaction channel (no thread spawned), use
-            // FollowupAsync so the answer attaches to the interaction. Otherwise post directly
-            // into the spawned thread via the rest client.
-            if (responseChannelId == Context.Channel.Id)
-                lastSent = await FollowupAsync(new InteractionMessageProperties
-                {
-                    Embeds = msgProps.Embeds,
-                    Components = msgProps.Components
-                });
-            else
-                lastSent = await restClient.SendMessageAsync(responseChannelId, msgProps);
+            sent = await FollowupAsync(new InteractionMessageProperties
+            {
+                Embeds = embeds,
+                Components = [EmbedResponseFormatter.FeedbackButtons]
+            });
+        }
+        else
+        {
+            sent = await restClient.SendMessageAsync(responseChannelId, new MessageProperties
+            {
+                Embeds = embeds,
+                Components = [EmbedResponseFormatter.FeedbackButtons]
+            });
         }
 
-        if (lastSent is not null)
-        {
-            await feedbackService.RecordResponseAsync(
-                geminiResponse,
-                question,
-                lastSent.Id,
-                responseChannelId,
-                Context.User.Id,
-                Context.Guild?.Id);
-        }
+        await feedbackService.RecordResponseAsync(
+            geminiResponse, question, sent.Id, responseChannelId,
+            Context.User.Id, Context.Guild?.Id);
     }
 
     [MessageCommand("Ask qBitBot")]
@@ -342,10 +337,10 @@ public sealed class QBitCommands(
             return;
         }
 
-        var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
+        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
         var sent = await FollowupAsync(new InteractionMessageProperties
         {
-            Embeds = [embed],
+            Embeds = embeds,
             Components = [EmbedResponseFormatter.FeedbackButtons]
         });
 
