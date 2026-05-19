@@ -40,6 +40,10 @@ public sealed record GeminiResponse
     [JsonIgnore]
     public string ThoughtSummary { get; init; } = string.Empty;
 
+    // Token usage from response.usageMetadata. Set post-deserialization for persistence + stats.
+    [JsonIgnore]
+    public TokenUsage Usage { get; init; } = TokenUsage.Empty;
+
     public bool ShouldRespond => Intent is "on_topic";
     public bool IsPiracy => Intent is "piracy";
     public bool IsOffTopic => Intent is "off_topic";

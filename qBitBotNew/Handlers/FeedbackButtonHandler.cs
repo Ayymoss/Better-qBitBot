@@ -11,9 +11,12 @@ public sealed class FeedbackButtonHandler(FeedbackService feedbackService)
     public async Task Helpful()
     {
         var interaction = Context.Interaction;
-        feedbackService.LogFeedback(interaction.Message.Id, interaction.User.Id, interaction.Channel!.Id, helpful: true);
+        await feedbackService.RecordRatingAsync(
+            interaction.Message.Id,
+            interaction.User.Id,
+            interaction.Channel!.Id,
+            helpful: true);
 
-        // Update the original message to remove buttons
         await RespondAsync(InteractionCallback.ModifyMessage(m => m.Components = []));
     }
 
@@ -21,7 +24,11 @@ public sealed class FeedbackButtonHandler(FeedbackService feedbackService)
     public async Task NotHelpful()
     {
         var interaction = Context.Interaction;
-        feedbackService.LogFeedback(interaction.Message.Id, interaction.User.Id, interaction.Channel!.Id, helpful: false);
+        await feedbackService.RecordRatingAsync(
+            interaction.Message.Id,
+            interaction.User.Id,
+            interaction.Channel!.Id,
+            helpful: false);
 
         await RespondAsync(InteractionCallback.ModifyMessage(m => m.Components = []));
     }

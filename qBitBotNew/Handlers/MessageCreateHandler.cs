@@ -15,6 +15,7 @@ namespace qBitBotNew.Handlers;
 public sealed partial class MessageCreateHandler(
     GeminiService geminiService,
     RateLimiterService rateLimiterService,
+    FeedbackService feedbackService,
     RestClient restClient,
     GatewayClient gatewayClient,
     IOptions<BotConfig> botConfig,
@@ -269,11 +270,27 @@ public sealed partial class MessageCreateHandler(
             }
 
             var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
+            RestMessage? lastSent = null;
             for (var i = 0; i < responseMessages.Count; i++)
             {
                 if (i == 0)
                     responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
-                await restClient.SendMessageAsync(message.ChannelId, responseMessages[i], null, ct);
+                lastSent = await restClient.SendMessageAsync(message.ChannelId, responseMessages[i], null, ct);
+            }
+
+            // Buttons live on the LAST message of the response — persist that one's ID so
+            // FeedbackButtonHandler can look up the row when the user clicks.
+            if (lastSent is not null)
+            {
+                var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
+                await feedbackService.RecordResponseAsync(
+                    geminiResponse,
+                    prompt,
+                    lastSent.Id,
+                    message.ChannelId,
+                    message.Author.Id,
+                    message.GuildId,
+                    ct);
             }
         }
         catch (Exception ex)

@@ -37,13 +37,14 @@ try
     builder.Services.Configure<PersistenceConfig>(builder.Configuration.GetSection("Persistence"));
 
     // SQLite persistence — file path resolved at startup. Directory is created on demand
-    // so the bot works on first run without manual setup.
+    // so the bot works on first run without manual setup. DbContextFactory is used (not
+    // AddDbContext) because FeedbackService is a singleton consuming a scoped DbContext.
     var persistenceCfg = builder.Configuration.GetSection("Persistence").Get<PersistenceConfig>() ?? new PersistenceConfig();
     var dbPath = Path.GetFullPath(persistenceCfg.DatabaseFile);
     var dbDir = Path.GetDirectoryName(dbPath);
     if (!string.IsNullOrEmpty(dbDir))
         Directory.CreateDirectory(dbDir);
-    builder.Services.AddDbContext<AppDbContext>(opts => opts.UseSqlite($"Data Source={dbPath}"));
+    builder.Services.AddDbContextFactory<AppDbContext>(opts => opts.UseSqlite($"Data Source={dbPath}"));
 
     // Discord gateway with required intents
     // Token is bound automatically from "Discord:Token" in config (appsettings, user-secrets, env vars)
@@ -80,9 +81,9 @@ try
     var host = builder.Build();
 
     // Apply EF Core migrations on startup so a fresh deployment self-provisions its schema.
-    using (var scope = host.Services.CreateScope())
     {
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var dbFactory = host.Services.GetRequiredService<IDbContextFactory<AppDbContext>>();
+        await using var db = await dbFactory.CreateDbContextAsync();
         await db.Database.MigrateAsync();
     }
 

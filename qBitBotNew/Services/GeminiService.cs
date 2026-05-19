@@ -178,8 +178,9 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
 
             var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
 
-            // Log token usage to gauge implicit-cache effectiveness before deciding on explicit caching.
-            // See [[project-phase2-persistence]] caching task.
+            // Capture token usage from usageMetadata for both logging and persistence.
+            // See [[project-phase2-persistence]] caching decision.
+            var tokenUsage = TokenUsage.Empty;
             if (json.TryGetProperty("usageMetadata", out var usage))
             {
                 var promptTokens = usage.TryGetProperty("promptTokenCount", out var p) && p.ValueKind == JsonValueKind.Number ? p.GetInt32() : 0;
@@ -187,6 +188,7 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                 var candidateTokens = usage.TryGetProperty("candidatesTokenCount", out var ca) && ca.ValueKind == JsonValueKind.Number ? ca.GetInt32() : 0;
                 var thoughtTokens = usage.TryGetProperty("thoughtsTokenCount", out var th) && th.ValueKind == JsonValueKind.Number ? th.GetInt32() : 0;
                 var totalTokens = usage.TryGetProperty("totalTokenCount", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt32() : 0;
+                tokenUsage = new TokenUsage(promptTokens, cachedTokens, candidateTokens, thoughtTokens, totalTokens);
                 LogTokenUsage(promptTokens, cachedTokens, candidateTokens, thoughtTokens, totalTokens);
             }
 
@@ -234,7 +236,7 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                     return Result<GeminiResponse>.Failure("Failed to deserialize Gemini response.");
                 }
 
-                result = result with { ThoughtSummary = thoughtSummary };
+                result = result with { ThoughtSummary = thoughtSummary, Usage = tokenUsage };
 
                 LogSuccess(result.Intent, result.Confidence, result.Reasoning, result.Response.Length, result.Resources.Count, thoughtSummary.Length);
                 return result;

@@ -7,7 +7,7 @@ using qBitBotNew.Services;
 
 namespace qBitBotNew.Handlers;
 
-public sealed class QBitCommands(GeminiService geminiService) : ApplicationCommandModule<ApplicationCommandContext>
+public sealed class QBitCommands(GeminiService geminiService, FeedbackService feedbackService) : ApplicationCommandModule<ApplicationCommandContext>
 {
     [SlashCommand("help", "How to use qBitBot")]
     public Task Help()
@@ -101,11 +101,19 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
         }
 
         var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
-        await FollowupAsync(new InteractionMessageProperties
+        var sent = await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],
             Components = [EmbedResponseFormatter.FeedbackButtons]
         });
+
+        await feedbackService.RecordResponseAsync(
+            geminiResponse,
+            question,
+            sent.Id,
+            Context.Channel.Id,
+            Context.User.Id,
+            Context.Guild?.Id);
     }
 
     [MessageCommand("Ask qBitBot")]
@@ -167,10 +175,18 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
         }
 
         var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
-        await FollowupAsync(new InteractionMessageProperties
+        var sent = await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],
             Components = [EmbedResponseFormatter.FeedbackButtons]
         });
+
+        await feedbackService.RecordResponseAsync(
+            geminiResponse,
+            question,
+            sent.Id,
+            Context.Channel.Id,
+            Context.User.Id,
+            Context.Guild?.Id);
     }
 }
