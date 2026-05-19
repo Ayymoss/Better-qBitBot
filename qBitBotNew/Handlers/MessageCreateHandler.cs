@@ -80,7 +80,7 @@ public sealed partial class MessageCreateHandler(
         // Auto-reply inside a thread the bot has previously responded in. Threads spawned
         // by an earlier invocation are purpose-built for a conversation, so we treat every
         // user message there as a direct question without needing the @mention.
-        if (IsThreadChannel(message)
+        if (await IsThreadChannelAsync(message, ct)
             && await feedbackService.HasBotRespondedInChannelAsync(message.ChannelId, ct))
         {
             await HandleDirectMention(message, ct);
@@ -90,7 +90,63 @@ public sealed partial class MessageCreateHandler(
         // No auto-response — bot only responds when explicitly invoked
     }
 
-    private static bool IsThreadChannel(Message message) => message.Channel is GuildThread;
+    // Channel-type cache so we don't issue a REST GetChannel for every message in a
+    // channel whose type we've already determined.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, ChannelType> _channelTypeCache = new();
+
+    private async Task<ChannelType?> ResolveChannelTypeAsync(Message message, CancellationToken ct)
+    {
+        if (message.Channel is { } cached)
+        {
+            // GuildThread inherits TextGuildChannel; check thread types first so the cache
+            // entry is correct for the auto-reply branch.
+            var type = cached switch
+            {
+                GuildThread t => t switch
+                {
+                    PublicGuildThread => ChannelType.PublicGuildThread,
+                    PrivateGuildThread => ChannelType.PrivateGuildThread,
+                    AnnouncementGuildThread => ChannelType.AnnouncementGuildThread,
+                    _ => ChannelType.PublicGuildThread
+                },
+                AnnouncementGuildChannel => ChannelType.AnnouncementGuildChannel,
+                TextGuildChannel => ChannelType.TextGuildChannel,
+                _ => ChannelType.TextGuildChannel
+            };
+            _channelTypeCache[message.ChannelId] = type;
+            return type;
+        }
+
+        if (_channelTypeCache.TryGetValue(message.ChannelId, out var hit))
+            return hit;
+
+        try
+        {
+            var fetched = await restClient.GetChannelAsync(message.ChannelId, null, ct);
+            // Channel.Type lives on UnknownChannel only — use type matching to derive it.
+            ChannelType resolved = fetched switch
+            {
+                GuildThread => ChannelType.PublicGuildThread,
+                AnnouncementGuildChannel => ChannelType.AnnouncementGuildChannel,
+                TextGuildChannel => ChannelType.TextGuildChannel,
+                _ => ChannelType.TextGuildChannel
+            };
+            _channelTypeCache[message.ChannelId] = resolved;
+            return resolved;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> IsThreadChannelAsync(Message message, CancellationToken ct)
+    {
+        var type = await ResolveChannelTypeAsync(message, ct);
+        return type is ChannelType.PublicGuildThread
+                    or ChannelType.PrivateGuildThread
+                    or ChannelType.AnnouncementGuildThread;
+    }
 
     private async Task HandleReplyToBot(Message message, RestMessage botMessage, CancellationToken ct = default)
     {
@@ -174,13 +230,16 @@ public sealed partial class MessageCreateHandler(
     // question, truncated to fit Discord's 100-char limit.
     private async Task<ulong> EnsureThreadAsync(Message message, CancellationToken ct)
     {
-        if (IsThreadChannel(message))
+        var type = await ResolveChannelTypeAsync(message, ct);
+
+        // Already a thread, or in a channel where threads don't apply (DM, voice, forum,
+        // category). Either way, post in the original channel.
+        if (type is ChannelType.PublicGuildThread
+                 or ChannelType.PrivateGuildThread
+                 or ChannelType.AnnouncementGuildThread)
             return message.ChannelId;
 
-        // GuildThread inherits from TextGuildChannel, but the IsThreadChannel guard above
-        // already filtered those. Anything that isn't a regular text/announcement channel
-        // (DM, voice, forum, category) is left alone.
-        if (message.Channel is not TextGuildChannel)
+        if (type is not (ChannelType.TextGuildChannel or ChannelType.AnnouncementGuildChannel or null))
             return message.ChannelId;
 
         try
@@ -197,8 +256,8 @@ public sealed partial class MessageCreateHandler(
         }
         catch (Exception ex)
         {
-            // If thread creation fails (permissions, archived, etc.), fall back to replying
-            // in the parent channel rather than dropping the user's question on the floor.
+            // If thread creation fails (permissions, archived, wrong channel type, etc.),
+            // fall back to replying in the parent channel rather than dropping the question.
             LogThreadCreationFailed(ex, message.ChannelId);
             return message.ChannelId;
         }

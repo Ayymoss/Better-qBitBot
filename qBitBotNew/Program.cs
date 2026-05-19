@@ -49,7 +49,10 @@ try
     // Token is bound automatically from "Discord:Token" in config (appsettings, user-secrets, env vars)
     builder.Services.AddDiscordGateway(options =>
     {
-        options.Intents = GatewayIntents.GuildMessages
+        // Guilds intent is what populates the channel cache (and thus Message.Channel),
+        // which the thread-spawn logic depends on.
+        options.Intents = GatewayIntents.Guilds
+                          | GatewayIntents.GuildMessages
                           | GatewayIntents.MessageContent
                           | GatewayIntents.GuildUsers;
         options.Presence = new PresenceProperties(UserStatusType.Online)
