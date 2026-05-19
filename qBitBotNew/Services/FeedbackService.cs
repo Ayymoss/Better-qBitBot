@@ -55,43 +55,54 @@ public sealed partial class FeedbackService(
         var cutoff24h = now - TimeSpan.FromHours(24);
         var cutoff7d = now - TimeSpan.FromDays(7);
 
-        var responsesLast24h = await db.Feedback.CountAsync(f => f.CreatedAt >= cutoff24h, ct);
-        var responsesLast7d = await db.Feedback.CountAsync(f => f.CreatedAt >= cutoff7d, ct);
-        var responsesAll = await db.Feedback.CountAsync(ct);
+        // SQLite EF can't translate DateTimeOffset comparisons; pull the columns we need
+        // and aggregate in memory. At hundreds-of-rows scale this is trivial.
+        var rows = await db.Feedback
+            .Select(f => new
+            {
+                f.CreatedAt,
+                f.Helpful,
+                f.Intent,
+                f.Confidence,
+                f.PromptTokens,
+                f.CachedTokens,
+                f.OutputTokens,
+                f.ThoughtTokens,
+                f.Prompt
+            })
+            .ToListAsync(ct);
 
-        var ratedCount = await db.Feedback.CountAsync(f => f.Helpful != null, ct);
-        var helpfulCount = await db.Feedback.CountAsync(f => f.Helpful == true, ct);
+        var responsesAll = rows.Count;
+        var responsesLast24h = rows.Count(r => r.CreatedAt >= cutoff24h);
+        var responsesLast7d = rows.Count(r => r.CreatedAt >= cutoff7d);
 
-        var window7d = db.Feedback.Where(f => f.CreatedAt >= cutoff7d);
-        var window7dOnTopic = window7d.Where(f => f.Intent == "on_topic");
+        var ratedCount = rows.Count(r => r.Helpful != null);
+        var helpfulCount = rows.Count(r => r.Helpful == true);
 
-        var onTopicCount = await window7d.CountAsync(f => f.Intent == "on_topic", ct);
-        var piracyCount = await window7d.CountAsync(f => f.Intent == "piracy", ct);
-        var offTopicCount = await window7d.CountAsync(f => f.Intent == "off_topic", ct);
+        var window7d = rows.Where(r => r.CreatedAt >= cutoff7d).ToList();
+        var window7dOnTopic = window7d.Where(r => r.Intent == "on_topic").ToList();
+
+        var onTopicCount = window7dOnTopic.Count;
+        var piracyCount = window7d.Count(r => r.Intent == "piracy");
+        var offTopicCount = window7d.Count(r => r.Intent == "off_topic");
 
         // Confidence + low-prompt stats only make sense for on-topic rows; rejections are
         // always low-confidence by their nature and would skew the breakdown.
-        var highCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.High, ct);
-        var mediumCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.Medium, ct);
-        var lowCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.Low, ct);
+        var highCount = window7dOnTopic.Count(r => r.Confidence == ConfidenceLevel.High);
+        var mediumCount = window7dOnTopic.Count(r => r.Confidence == ConfidenceLevel.Medium);
+        var lowCount = window7dOnTopic.Count(r => r.Confidence == ConfidenceLevel.Low);
 
-        var tokenTotals = await window7d
-            .GroupBy(_ => 1)
-            .Select(g => new
-            {
-                Prompt = g.Sum(f => (long)f.PromptTokens),
-                Cached = g.Sum(f => (long)f.CachedTokens),
-                Output = g.Sum(f => (long)f.OutputTokens),
-                Thoughts = g.Sum(f => (long)f.ThoughtTokens)
-            })
-            .FirstOrDefaultAsync(ct);
+        var promptTokens = window7d.Sum(r => (long)r.PromptTokens);
+        var cachedTokens = window7d.Sum(r => (long)r.CachedTokens);
+        var outputTokens = window7d.Sum(r => (long)r.OutputTokens);
+        var thoughtTokens = window7d.Sum(r => (long)r.ThoughtTokens);
 
-        var lowPrompts = await window7dOnTopic
-            .Where(f => f.Confidence == ConfidenceLevel.Low)
-            .OrderByDescending(f => f.CreatedAt)
+        var lowPrompts = window7dOnTopic
+            .Where(r => r.Confidence == ConfidenceLevel.Low)
+            .OrderByDescending(r => r.CreatedAt)
             .Take(5)
-            .Select(f => f.Prompt)
-            .ToListAsync(ct);
+            .Select(r => r.Prompt)
+            .ToList();
 
         return new StatsSnapshot(
             responsesLast24h,
@@ -105,10 +116,10 @@ public sealed partial class FeedbackService(
             highCount,
             mediumCount,
             lowCount,
-            tokenTotals?.Prompt ?? 0,
-            tokenTotals?.Cached ?? 0,
-            tokenTotals?.Output ?? 0,
-            tokenTotals?.Thoughts ?? 0,
+            promptTokens,
+            cachedTokens,
+            outputTokens,
+            thoughtTokens,
             lowPrompts);
     }
 
