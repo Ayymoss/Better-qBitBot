@@ -28,6 +28,31 @@ public static class EmbedResponseFormatter
     public static EmbedFooterProperties BuildHintFooter() =>
         new() { Text = FooterHints[Random.Shared.Next(FooterHints.Length)] };
 
+    // Shown while Gemini is generating. Mix of progress phrases and quick tips so the
+    // ~10s wait feels less dead. Picked at random per request.
+    private static readonly string[] PlaceholderLines =
+    [
+        "_Looking into this..._",
+        "_Reading your question..._",
+        "_Thinking..._",
+        "_Checking the docs..._",
+        "_One moment..._",
+        "_Working on it..._",
+        "_Tip while you wait: reply to my answers to ask a follow-up._",
+        "_Tip while you wait: use `/qbit` for one-off questions._",
+        "_Tip while you wait: react 👍 / 👎 once I'm done — it helps tune future answers._",
+        "_Tip while you wait: right-click any message → Apps → Ask qBitBot._",
+        "_Tip while you wait: my responses are AI-generated — verify before applying._",
+        "_Have a screenshot of your settings? Attach it next time — I can read images._",
+        "_Pro tip: in a thread with me, you can ping me without `@`-mentioning._"
+    ];
+
+    public static EmbedProperties BuildPlaceholderEmbed() => new()
+    {
+        Description = PlaceholderLines[Random.Shared.Next(PlaceholderLines.Length)],
+        Color = new Color(120, 144, 156) // blue-grey
+    };
+
     public static readonly ActionRowProperties FeedbackButtons = new([
         new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
         new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger),

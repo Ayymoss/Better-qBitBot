@@ -142,11 +142,7 @@ public sealed class GreetButtonHandler(
         // Placeholder so the thread isn't empty during the Gemini wait.
         var placeholder = await restClient.SendMessageAsync(responseChannelId, new MessageProperties
         {
-            Embeds = [new EmbedProperties
-            {
-                Description = "_Looking into this..._",
-                Color = new Color(120, 144, 156)
-            }]
+            Embeds = [EmbedResponseFormatter.BuildPlaceholderEmbed()]
         });
 
         var result = await geminiService.AskAsync(conversation, attachments);

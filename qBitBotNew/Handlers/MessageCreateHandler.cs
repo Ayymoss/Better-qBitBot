@@ -329,7 +329,7 @@ public sealed partial class MessageCreateHandler(
         {
             var placeholderProps = new MessageProperties
             {
-                Embeds = [PlaceholderEmbed()]
+                Embeds = [EmbedResponseFormatter.BuildPlaceholderEmbed()]
             };
             if (sameChannel)
                 placeholderProps.MessageReference = MessageReferenceProperties.Reply(message.Id);
@@ -456,12 +456,6 @@ public sealed partial class MessageCreateHandler(
                 await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex, ct);
         }
     }
-
-    private static EmbedProperties PlaceholderEmbed() => new()
-    {
-        Description = "_Looking into this..._",
-        Color = new Color(120, 144, 156) // blue-grey
-    };
 
     private async Task TryReplaceWithError(ulong channelId, ulong messageId, CancellationToken ct)
     {
