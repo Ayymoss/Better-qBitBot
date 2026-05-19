@@ -300,79 +300,181 @@ public sealed partial class MessageCreateHandler(
 
     private async Task RespondWithConversation(Message message, ulong targetChannelId, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true, CancellationToken ct = default)
     {
+        // Reply references only work inside the same channel as the original message.
+        // When responding inside a spawned thread, the thread itself anchors the conversation.
+        var sameChannel = targetChannelId == message.ChannelId;
+
+        // Post a placeholder right away so the user sees the bot has accepted the question
+        // while Gemini runs. The placeholder gets edited in-place with the final response.
+        RestMessage? placeholder = null;
+        try
+        {
+            var placeholderProps = new MessageProperties
+            {
+                Embeds = [PlaceholderEmbed()]
+            };
+            if (sameChannel)
+                placeholderProps.MessageReference = MessageReferenceProperties.Reply(message.Id);
+            placeholder = await restClient.SendMessageAsync(targetChannelId, placeholderProps, null, ct);
+        }
+        catch (Exception ex)
+        {
+            LogPlaceholderSendFailed(ex);
+            // Fall through — we can still try to send the final response even without a placeholder.
+        }
+
         try
         {
             using var typing = restClient.EnterTypingScope(targetChannelId);
             var result = await geminiService.AskAsync(conversation, attachments, ct);
 
             if (result.IsFailure || result.Value is null)
+            {
+                if (placeholder is not null)
+                    await TryReplaceWithError(targetChannelId, placeholder.Id, ct);
                 return;
+            }
 
             var geminiResponse = result.Value;
             var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
-            // Reply references only work inside the same channel as the original message.
-            // When responding inside a spawned thread, the thread itself anchors the conversation.
-            var sameChannel = targetChannelId == message.ChannelId;
 
-            // For direct invocations (@mention / reply-to), give feedback on why we can't help.
-            // Rejections are still persisted so they count toward the daily turn budget.
+            // Rejection: edit placeholder to the rejection embed. Still persisted so it
+            // counts toward the daily turn budget.
             if (!geminiResponse.ShouldRespond)
             {
-                if (isDirectInvocation)
+                if (!isDirectInvocation)
                 {
-                    var rejection = geminiResponse.IsPiracy
-                        ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
-                        : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
+                    if (placeholder is not null)
+                        await TryDeletePlaceholder(targetChannelId, placeholder.Id, ct);
+                    return;
+                }
 
-                    var rejectionProps = new MessageProperties
+                var rejection = geminiResponse.IsPiracy
+                    ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
+                    : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
+                var rejectionEmbed = new EmbedProperties
+                {
+                    Description = rejection,
+                    Color = new Color(158, 158, 158),
+                    Footer = EmbedResponseFormatter.Footer
+                };
+
+                ulong rejectionMessageId;
+                if (placeholder is not null)
+                {
+                    await restClient.ModifyMessageAsync(targetChannelId, placeholder.Id, opts =>
                     {
-                        Embeds = [new EmbedProperties
-                        {
-                            Description = rejection,
-                            Color = new Color(158, 158, 158), // grey
-                            Footer = EmbedResponseFormatter.Footer
-                        }]
-                    };
+                        opts.Embeds = [rejectionEmbed];
+                        opts.Components = [];
+                    }, null, ct);
+                    rejectionMessageId = placeholder.Id;
+                }
+                else
+                {
+                    var rejectionProps = new MessageProperties { Embeds = [rejectionEmbed] };
                     if (sameChannel)
                         rejectionProps.MessageReference = MessageReferenceProperties.Reply(message.Id);
-
                     var rejectionMsg = await restClient.SendMessageAsync(targetChannelId, rejectionProps, null, ct);
-
-                    await feedbackService.RecordResponseAsync(
-                        geminiResponse, prompt, rejectionMsg.Id,
-                        targetChannelId, message.Author.Id, message.GuildId, ct);
+                    rejectionMessageId = rejectionMsg.Id;
                 }
+
+                await feedbackService.RecordResponseAsync(
+                    geminiResponse, prompt, rejectionMessageId,
+                    targetChannelId, message.Author.Id, message.GuildId, ct);
                 return;
             }
 
+            // On-topic: edit placeholder with first chunk; if multi-embed, send the rest as
+            // new messages. Buttons live on the LAST message; that's the one whose id is
+            // persisted so FeedbackButtonHandler / Why can look it up.
             var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
-            RestMessage? lastSent = null;
-            for (var i = 0; i < responseMessages.Count; i++)
+            ulong feedbackMessageId;
+
+            if (placeholder is not null)
             {
-                if (i == 0 && sameChannel)
-                    responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
-                lastSent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
+                var first = responseMessages[0];
+                await restClient.ModifyMessageAsync(targetChannelId, placeholder.Id, opts =>
+                {
+                    opts.Embeds = first.Embeds;
+                    opts.Components = responseMessages.Count == 1 ? first.Components : [];
+                }, null, ct);
+                feedbackMessageId = placeholder.Id;
+
+                for (var i = 1; i < responseMessages.Count; i++)
+                {
+                    var sent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
+                    if (i == responseMessages.Count - 1)
+                        feedbackMessageId = sent.Id;
+                }
+            }
+            else
+            {
+                RestMessage? lastSent = null;
+                for (var i = 0; i < responseMessages.Count; i++)
+                {
+                    if (i == 0 && sameChannel)
+                        responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
+                    lastSent = await restClient.SendMessageAsync(targetChannelId, responseMessages[i], null, ct);
+                }
+                if (lastSent is null) return;
+                feedbackMessageId = lastSent.Id;
             }
 
-            // Buttons live on the LAST message of the response — persist that one's ID so
-            // FeedbackButtonHandler can look up the row when the user clicks. ChannelId is
-            // the target (thread or parent) so HasBotRespondedInChannelAsync can find it.
-            if (lastSent is not null)
-            {
-                await feedbackService.RecordResponseAsync(
-                    geminiResponse,
-                    prompt,
-                    lastSent.Id,
-                    targetChannelId,
-                    message.Author.Id,
-                    message.GuildId,
-                    ct);
-            }
+            await feedbackService.RecordResponseAsync(
+                geminiResponse,
+                prompt,
+                feedbackMessageId,
+                targetChannelId,
+                message.Author.Id,
+                message.GuildId,
+                ct);
         }
         catch (Exception ex)
         {
             LogResponseFailed(ex, message.Id, message.Author.Id);
-            await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex, ct);
+            if (placeholder is not null)
+                await TryReplaceWithError(targetChannelId, placeholder.Id, ct);
+            else
+                await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex, ct);
+        }
+    }
+
+    private static EmbedProperties PlaceholderEmbed() => new()
+    {
+        Description = "_Looking into this..._",
+        Color = new Color(120, 144, 156) // blue-grey
+    };
+
+    private async Task TryReplaceWithError(ulong channelId, ulong messageId, CancellationToken ct)
+    {
+        try
+        {
+            var contact = botConfig.Value.ErrorContactHandle;
+            await restClient.ModifyMessageAsync(channelId, messageId, opts =>
+            {
+                opts.Embeds = [new EmbedProperties
+                {
+                    Description = $"Something went wrong while processing your request. Please ping {contact} if this keeps happening.",
+                    Color = new Color(229, 57, 53)
+                }];
+                opts.Components = [];
+            }, null, ct);
+        }
+        catch (Exception ex)
+        {
+            LogErrorReplyFailed(ex);
+        }
+    }
+
+    private async Task TryDeletePlaceholder(ulong channelId, ulong messageId, CancellationToken ct)
+    {
+        try
+        {
+            await restClient.DeleteMessageAsync(channelId, messageId, null, ct);
+        }
+        catch (Exception ex)
+        {
+            LogPlaceholderDeleteFailed(ex);
         }
     }
 
@@ -438,6 +540,12 @@ public sealed partial class MessageCreateHandler(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to create thread in channel {ChannelId} — falling back to in-channel reply")]
     private partial void LogThreadCreationFailed(Exception ex, ulong channelId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send placeholder message")]
+    private partial void LogPlaceholderSendFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to delete placeholder after off-topic / non-direct invocation")]
+    private partial void LogPlaceholderDeleteFailed(Exception ex);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to send error reply")]
     private partial void LogErrorReplyFailed(Exception ex);
