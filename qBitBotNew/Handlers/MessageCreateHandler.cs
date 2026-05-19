@@ -16,6 +16,7 @@ public sealed partial class MessageCreateHandler(
     GeminiService geminiService,
     RateLimiterService rateLimiterService,
     FeedbackService feedbackService,
+    GreetService greetService,
     RestClient restClient,
     GatewayClient gatewayClient,
     IOptions<BotConfig> botConfig,
@@ -33,6 +34,23 @@ public sealed partial class MessageCreateHandler(
 
         var ct = lifetime.ApplicationStopping;
         var botUserId = gatewayClient.Id;
+
+        // If this message is a reply to someone we're considering greeting, cancel the
+        // pending greet — humans are already engaged, we don't need to butt in.
+        if (message.ReferencedMessage is { } refMsg && !refMsg.Author.IsBot)
+            greetService.Cancel(refMsg.Author.Id);
+
+        // Track new users so the GreetWorker can offer the bot to them after a quiet period.
+        // Their first invocation of the bot through any path (including the greet button) will
+        // record a Feedback row, which suppresses future greet attempts for them.
+        if (botConfig.Value.GreetEnabled
+            && message.Author is GuildUser guildUser
+            && guildUser.JoinedAt is { } joinedAt
+            && DateTimeOffset.UtcNow - joinedAt < TimeSpan.FromHours(botConfig.Value.NewUserThresholdHours)
+            && !greetService.IsAlreadyGreeted(message.Author.Id))
+        {
+            greetService.TrackOrUpdate(message.Author.Id, message.ChannelId, message.Id, message.GuildId);
+        }
 
         // Check if this is a reply to the bot's message
         if (message.ReferencedMessage is { } referenced)

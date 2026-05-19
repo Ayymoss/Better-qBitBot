@@ -75,6 +75,8 @@ try
     // Services
     builder.Services.AddSingleton<RateLimiterService>();
     builder.Services.AddSingleton<FeedbackService>();
+    builder.Services.AddSingleton<GreetService>();
+    builder.Services.AddHostedService<GreetWorker>();
 
     // Gateway event handlers
     builder.Services.AddGatewayHandler<MessageCreateHandler>();
