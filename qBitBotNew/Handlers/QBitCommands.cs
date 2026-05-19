@@ -9,6 +9,58 @@ namespace qBitBotNew.Handlers;
 
 public sealed class QBitCommands(GeminiService geminiService) : ApplicationCommandModule<ApplicationCommandContext>
 {
+    [SlashCommand("help", "How to use qBitBot")]
+    public Task Help()
+    {
+        var embed = new EmbedProperties
+        {
+            Title = "qBitBot — how to ask",
+            Description =
+                "I answer **qBitTorrent client** questions (config, troubleshooting, WebUI, API). "
+              + "Piracy and off-topic questions are declined.",
+            Color = new Color(67, 160, 71),
+            Fields =
+            [
+                new EmbedFieldProperties
+                {
+                    Name = "Mention me",
+                    Value = "`@qBitBot why won't my torrent seed?` — I'll pull in nearby messages and any screenshots for context.",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Reply to my message",
+                    Value = "Reply to one of my answers to ask a follow-up. I'll remember the chain.",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "/qbit <question>",
+                    Value = "One-off question. No surrounding context, just your text.",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Right-click a message → Apps → Ask qBitBot",
+                    Value = "Run me against someone else's message + any attached screenshots.",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Rate my answers",
+                    Value = "Use the 👍 / 👎 buttons. Feedback helps improve future responses.",
+                    Inline = false
+                }
+            ],
+            Footer = new EmbedFooterProperties { Text = "Cooldown applies per user. Be kind." }
+        };
+
+        return RespondAsync(InteractionCallback.Message(new InteractionMessageProperties
+        {
+            Embeds = [embed],
+            Flags = MessageFlags.Ephemeral
+        }));
+    }
 
     [SlashCommand("qbit", "Ask a qBitTorrent question")]
     public async Task Ask(

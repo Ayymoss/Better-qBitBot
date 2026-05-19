@@ -35,6 +35,11 @@ public sealed record GeminiResponse
     [JsonPropertyName("follow_up_questions")]
     public List<string> FollowUpQuestions { get; init; } = [];
 
+    // Populated post-deserialization from Gemini thinking parts (where part.thought == true).
+    // Not part of the structured-output schema.
+    [JsonIgnore]
+    public string ThoughtSummary { get; init; } = string.Empty;
+
     public bool ShouldRespond => Intent is "on_topic";
     public bool IsPiracy => Intent is "piracy";
     public bool IsOffTopic => Intent is "off_topic";

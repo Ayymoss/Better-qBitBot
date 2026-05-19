@@ -162,7 +162,12 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
             generationConfig = new
             {
                 responseMimeType = "application/json",
-                responseJsonSchema = ResponseSchema
+                responseJsonSchema = ResponseSchema,
+                thinkingConfig = new
+                {
+                    thinkingLevel = "low",
+                    includeThoughts = true
+                }
             }
         };
 
@@ -173,12 +178,43 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
 
             var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
 
-            var text = json
+            // Log token usage to gauge implicit-cache effectiveness before deciding on explicit caching.
+            // See [[project-phase2-persistence]] caching task.
+            if (json.TryGetProperty("usageMetadata", out var usage))
+            {
+                var promptTokens = usage.TryGetProperty("promptTokenCount", out var p) && p.ValueKind == JsonValueKind.Number ? p.GetInt32() : 0;
+                var cachedTokens = usage.TryGetProperty("cachedContentTokenCount", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt32() : 0;
+                var candidateTokens = usage.TryGetProperty("candidatesTokenCount", out var ca) && ca.ValueKind == JsonValueKind.Number ? ca.GetInt32() : 0;
+                var thoughtTokens = usage.TryGetProperty("thoughtsTokenCount", out var th) && th.ValueKind == JsonValueKind.Number ? th.GetInt32() : 0;
+                var totalTokens = usage.TryGetProperty("totalTokenCount", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt32() : 0;
+                LogTokenUsage(promptTokens, cachedTokens, candidateTokens, thoughtTokens, totalTokens);
+            }
+
+            var parts = json
                 .GetProperty("candidates")[0]
                 .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text")
-                .GetString();
+                .GetProperty("parts");
+
+            // With includeThoughts=true, parts contain a mix of thought summaries and the final JSON output.
+            // Thought parts have part.thought == true; the structured response is the remaining text part.
+            string? text = null;
+            List<string> thoughtChunks = [];
+            foreach (var part in parts.EnumerateArray())
+            {
+                if (!part.TryGetProperty("text", out var textProp))
+                    continue;
+                var partText = textProp.GetString();
+                if (string.IsNullOrEmpty(partText))
+                    continue;
+
+                var isThought = part.TryGetProperty("thought", out var thoughtProp)
+                                && thoughtProp.ValueKind == JsonValueKind.True;
+
+                if (isThought)
+                    thoughtChunks.Add(partText);
+                else
+                    text = partText;
+            }
 
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -186,6 +222,7 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                 return Result<GeminiResponse>.Failure("Gemini returned an empty response.");
             }
 
+            var thoughtSummary = string.Join("\n\n", thoughtChunks);
             LogRawResponse(text);
 
             try
@@ -197,7 +234,9 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                     return Result<GeminiResponse>.Failure("Failed to deserialize Gemini response.");
                 }
 
-                LogSuccess(result.Intent, result.Confidence, result.Reasoning, result.Response.Length, result.Resources.Count);
+                result = result with { ThoughtSummary = thoughtSummary };
+
+                LogSuccess(result.Intent, result.Confidence, result.Reasoning, result.Response.Length, result.Resources.Count, thoughtSummary.Length);
                 return result;
             }
             catch (JsonException jsonEx)
@@ -249,8 +288,11 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
     [LoggerMessage(Level = LogLevel.Error, Message = "Gemini returned null after deserialization")]
     private partial void LogDeserializationNull();
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Gemini result — Intent: {Intent}, Confidence: {Confidence}, Reasoning: {Reasoning}, Length: {Length}, Resources: {Resources}")]
-    private partial void LogSuccess(string intent, ConfidenceLevel confidence, string reasoning, int length, int resources);
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Gemini result — Intent: {Intent}, Confidence: {Confidence}, Reasoning: {Reasoning}, Length: {Length}, Resources: {Resources}, ThoughtChars: {ThoughtChars}")]
+    private partial void LogSuccess(string intent, ConfidenceLevel confidence, string reasoning, int length, int resources, int thoughtChars);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Gemini tokens — Prompt: {Prompt}, Cached: {Cached}, Output: {Output}, Thoughts: {Thoughts}, Total: {Total}")]
+    private partial void LogTokenUsage(int prompt, int cached, int output, int thoughts, int total);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Gemini API call failed")]
     private partial void LogApiCallFailed(Exception ex);

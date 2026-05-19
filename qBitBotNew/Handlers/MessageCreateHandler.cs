@@ -91,8 +91,11 @@ public sealed partial class MessageCreateHandler(
         foreach (var (isBot, content) in chain)
             conversation.Add(new GeminiMessage(isBot ? "model" : "user", content));
 
-        // Add the current follow-up as the final user turn
-        conversation.Add(new GeminiMessage("user", message.Content));
+        // Add the current follow-up as the final user turn. Strip the bot's @mention token
+        // (Discord auto-pings on reply by default) so Gemini doesn't see raw <@id> noise.
+        var botMention = $"<@{gatewayClient.Id}>";
+        var followUpText = message.Content.Replace(botMention, "").Trim();
+        conversation.Add(new GeminiMessage("user", followUpText));
 
         var attachments = ExtractAttachments(message);
         await RespondWithConversation(message, conversation, attachments, ct: ct);
@@ -316,7 +319,10 @@ public sealed partial class MessageCreateHandler(
     {
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(5));
+            // Hold the notice and \u23f3 reaction for the full cooldown duration so the user
+            // doesn't see the message vanish while still being rate-limited.
+            if (remaining > TimeSpan.Zero)
+                await Task.Delay(remaining);
 
             try
             {
@@ -326,10 +332,6 @@ public sealed partial class MessageCreateHandler(
             {
                 LogDeleteCooldownNoticeFailed(ex);
             }
-
-            var reactionDelay = remaining - TimeSpan.FromSeconds(5);
-            if (reactionDelay > TimeSpan.Zero)
-                await Task.Delay(reactionDelay);
 
             try
             {
