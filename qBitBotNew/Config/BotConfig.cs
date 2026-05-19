@@ -3,7 +3,6 @@ namespace qBitBotNew.Config;
 public sealed record BotConfig
 {
     public int NewUserThresholdHours { get; init; } = 24;
-    public int MessageAggregationWindowSeconds { get; init; } = 60;
 
     // New-user greeting: after a user that joined < NewUserThresholdHours ago posts in a
     // channel and goes silent for GreetWaitMinutes minutes (and nobody replies to them),
