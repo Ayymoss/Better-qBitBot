@@ -12,13 +12,3 @@ public record Result<T>
 
     public static implicit operator Result<T>(T value) => Success(value);
 }
-
-public record Result
-{
-    public string? Error { get; init; }
-    public bool IsSuccess => Error is null;
-    public bool IsFailure => Error is not null;
-
-    public static Result Success() => new();
-    public static Result Failure(string error) => new() { Error = error };
-}

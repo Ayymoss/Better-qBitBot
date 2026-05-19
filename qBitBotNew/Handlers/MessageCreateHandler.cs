@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NetCord;
@@ -17,6 +18,7 @@ public sealed partial class MessageCreateHandler(
     RestClient restClient,
     GatewayClient gatewayClient,
     IOptions<BotConfig> botConfig,
+    IHostApplicationLifetime lifetime,
     ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
 {
     public async ValueTask HandleAsync(Message message)
@@ -28,6 +30,7 @@ public sealed partial class MessageCreateHandler(
         if (message.GuildId is not { } guildId)
             return;
 
+        var ct = lifetime.ApplicationStopping;
         var botUserId = gatewayClient.Id;
 
         // Check if this is a reply to the bot's message
@@ -36,14 +39,14 @@ public sealed partial class MessageCreateHandler(
             // Someone replying to the bot — continuation or invocation on behalf
             if (referenced.Author.Id == botUserId)
             {
-                await HandleReplyToBot(message, referenced);
+                await HandleReplyToBot(message, referenced, ct);
                 return;
             }
 
             // Someone @mentioning the bot while replying to another user — invocation on behalf
             if (IsBotMentioned(message, botUserId))
             {
-                await HandleInvocationOnBehalf(message, referenced);
+                await HandleInvocationOnBehalf(message, referenced, ct);
                 return;
             }
         }
@@ -51,7 +54,7 @@ public sealed partial class MessageCreateHandler(
         // Check if this is a direct @mention of the bot
         if (IsBotMentioned(message, botUserId))
         {
-            await HandleDirectMention(message);
+            await HandleDirectMention(message, ct);
             return;
         }
 
@@ -300,8 +303,8 @@ public sealed partial class MessageCreateHandler(
                 MessageReference = MessageReferenceProperties.Reply(message.Id)
             }, null, ct);
 
-            // Clean up the notice and reaction on a background task
-            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining, CancellationToken.None);
+            // Clean up the notice and reaction on a background task \u2014 survives request cancellation
+            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining);
         }
         catch (Exception ex)
         {
@@ -309,15 +312,15 @@ public sealed partial class MessageCreateHandler(
         }
     }
 
-    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining, CancellationToken ct)
+    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            await Task.Delay(TimeSpan.FromSeconds(5));
 
             try
             {
-                await restClient.DeleteMessageAsync(channelId, noticeId, null, ct);
+                await restClient.DeleteMessageAsync(channelId, noticeId);
             }
             catch (Exception ex)
             {
@@ -326,20 +329,16 @@ public sealed partial class MessageCreateHandler(
 
             var reactionDelay = remaining - TimeSpan.FromSeconds(5);
             if (reactionDelay > TimeSpan.Zero)
-                await Task.Delay(reactionDelay, ct);
+                await Task.Delay(reactionDelay);
 
             try
             {
-                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"), null, ct);
+                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"));
             }
             catch (Exception ex)
             {
                 LogRemoveCooldownReactionFailed(ex);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Ignore cancellation
         }
         catch (Exception ex)
         {

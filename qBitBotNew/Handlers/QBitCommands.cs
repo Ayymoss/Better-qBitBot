@@ -23,7 +23,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
         {
             await FollowupAsync(new InteractionMessageProperties
             {
-                Content = $"Something went wrong — {result.Error ?? "couldn't get a response"}. Try again later."
+                Content = "Something went wrong — couldn't get a response. Try again later."
             });
             return;
         }
@@ -89,7 +89,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
         {
             await FollowupAsync(new InteractionMessageProperties
             {
-                Content = $"Something went wrong — {result.Error ?? "couldn't get a response"}. Try again later."
+                Content = "Something went wrong — couldn't get a response. Try again later."
             });
             return;
         }

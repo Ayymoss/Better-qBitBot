@@ -9,14 +9,13 @@
   </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="NetCord" Version="1.0.0-alpha.475" />
-        <PackageReference Include="NetCord.Services" Version="1.0.0-alpha.475" />
-        <PackageReference Include="NetCord.Hosting" Version="1.0.0-alpha.475" />
-        <PackageReference Include="NetCord.Hosting.Services" Version="1.0.0-alpha.475" />
-        <PackageReference Include="NetCord.Hosting.AspNetCore" Version="1.0.0-alpha.475" />
-        <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0-preview.*" />
+        <PackageReference Include="NetCord" Version="1.0.0-alpha.489" />
+        <PackageReference Include="NetCord.Services" Version="1.0.0-alpha.489" />
+        <PackageReference Include="NetCord.Hosting" Version="1.0.0-alpha.489" />
+        <PackageReference Include="NetCord.Hosting.Services" Version="1.0.0-alpha.489" />
+        <PackageReference Include="NetCord.Hosting.AspNetCore" Version="1.0.0-alpha.489" />
+        <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.8" />
         <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
-        <PackageReference Include="Serilog.Sinks.File" Version="8.0.0-nblumhardt-02322" />
     </ItemGroup>
 
     <ItemGroup>
