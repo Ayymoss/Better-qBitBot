@@ -2,7 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
@@ -55,10 +54,13 @@ try
                           | GatewayIntents.GuildUsers;
         options.Presence = new PresenceProperties(UserStatusType.Online)
         {
-            Activities = [new UserActivityProperties("@mention, /qbit, or right-click a message", UserActivityType.Custom)
-            {
-                State = "@mention, /qbit, or right-click a message"
-            }]
+            Activities =
+            [
+                new UserActivityProperties("@mention, /qbit, or right-click a message", UserActivityType.Custom)
+                {
+                    State = "@mention, /qbit, or right-click a message"
+                }
+            ]
         };
     });
 
@@ -84,11 +86,9 @@ try
     var host = builder.Build();
 
     // Apply EF Core migrations on startup so a fresh deployment self-provisions its schema.
-    {
-        var dbFactory = host.Services.GetRequiredService<IDbContextFactory<AppDbContext>>();
-        await using var db = await dbFactory.CreateDbContextAsync();
-        await db.Database.MigrateAsync();
-    }
+    var dbFactory = host.Services.GetRequiredService<IDbContextFactory<AppDbContext>>();
+    await using var db = await dbFactory.CreateDbContextAsync();
+    await db.Database.MigrateAsync();
 
     // Register application command modules and component interaction modules
     host.AddModules(typeof(Program).Assembly);

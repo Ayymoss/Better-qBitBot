@@ -49,7 +49,7 @@ public sealed partial class MessageCreateHandler(
             && DateTimeOffset.UtcNow - joinedAt < TimeSpan.FromHours(botConfig.Value.NewUserThresholdHours)
             && !greetService.IsAlreadyGreeted(message.Author.Id))
         {
-            greetService.TrackOrUpdate(message.Author.Id, message.ChannelId, message.Id, message.GuildId);
+            greetService.TrackOrUpdate(message.Author.Id, message.ChannelId, message.Id);
         }
 
         // Check if this is a reply to the bot's message

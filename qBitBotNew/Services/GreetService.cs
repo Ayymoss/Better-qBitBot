@@ -13,12 +13,11 @@ public sealed class GreetService
         ulong UserId,
         ulong ChannelId,
         ulong LastMessageId,
-        DateTimeOffset LastSeenAt,
-        ulong? GuildId);
+        DateTimeOffset LastSeenAt);
 
     private readonly ConcurrentDictionary<ulong, PendingGreet> _pending = new();
     private readonly HashSet<ulong> _greeted = [];
-    private readonly object _greetedLock = new();
+    private readonly Lock _greetedLock = new();
 
     public bool IsAlreadyGreeted(ulong userId)
     {
@@ -26,11 +25,11 @@ public sealed class GreetService
             return _greeted.Contains(userId);
     }
 
-    public void TrackOrUpdate(ulong userId, ulong channelId, ulong messageId, ulong? guildId)
+    public void TrackOrUpdate(ulong userId, ulong channelId, ulong messageId)
     {
         if (IsAlreadyGreeted(userId))
             return;
-        _pending[userId] = new PendingGreet(userId, channelId, messageId, DateTimeOffset.UtcNow, guildId);
+        _pending[userId] = new PendingGreet(userId, channelId, messageId, DateTimeOffset.UtcNow);
     }
 
     /// <summary>Removes any pending greet for <paramref name="userId"/> — e.g. someone replied to them.</summary>
