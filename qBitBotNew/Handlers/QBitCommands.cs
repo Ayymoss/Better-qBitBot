@@ -13,14 +13,6 @@ public sealed class QBitCommands(
     RateLimiterService rateLimiterService,
     RestClient restClient) : ApplicationCommandModule<ApplicationCommandContext>
 {
-    private static string BuildThreadName(string question)
-    {
-        var trimmed = question.Replace('\n', ' ').Trim();
-        if (string.IsNullOrEmpty(trimmed))
-            return "qBitBot question";
-        return trimmed.Length <= 80 ? trimmed : trimmed[..77] + "...";
-    }
-
     private static string TruncateForPlaceholder(string text, int max) =>
         text.Length <= max ? text : text[..(max - 1)] + "…";
 
@@ -150,7 +142,13 @@ public sealed class QBitCommands(
                 new EmbedFieldProperties
                 {
                     Name = "Right-click a message → Apps → Ask qBitBot",
-                    Value = "Run me against someone else's message + any attached screenshots.",
+                    Value = "Run me against someone else's message + any attached screenshots. Reply lands in-place.",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Right-click a message → Apps → Ask qBitBot (Thread)",
+                    Value = "Same as above but spawns a thread on that message. Handy for helpers running me on a newcomer's question without cluttering the channel.",
                     Inline = false
                 },
                 new EmbedFieldProperties
@@ -236,7 +234,7 @@ public sealed class QBitCommands(
             {
                 var thread = await restClient.CreateGuildThreadAsync(
                     Context.Channel.Id, placeholder.Id,
-                    new GuildThreadFromMessageProperties(BuildThreadName(question)));
+                    new GuildThreadFromMessageProperties(ThreadNaming.Build(question)));
                 responseChannelId = thread.Id;
             }
             catch
@@ -267,6 +265,9 @@ public sealed class QBitCommands(
         await feedbackService.RecordResponseAsync(
             geminiResponse, question, sent.Id, responseChannelId,
             Context.User.Id, Context.Guild?.Id);
+
+        if (responseChannelId != Context.Channel.Id && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, responseChannelId, ThreadNaming.Build(geminiResponse.Topic));
     }
 
     [MessageCommand("Ask qBitBot")]
@@ -351,5 +352,123 @@ public sealed class QBitCommands(
             Context.Channel.Id,
             Context.User.Id,
             Context.Guild?.Id);
+    }
+
+    // Right-click → Apps → "Ask qBitBot (Thread)". Same as "Ask qBitBot" but spawns a
+    // thread on the target message and posts the answer inside it. Useful for
+    // admins/helpers running the bot on someone else's question without cluttering channel.
+    [MessageCommand("Ask qBitBot (Thread)")]
+    public async Task AskFromMessageThreaded(RestMessage message)
+    {
+        var budget = await rateLimiterService.CheckBudgetAsync(Context.User.Id);
+        if (!budget.Allowed)
+        {
+            await RespondAsync(InteractionCallback.Message(BudgetExceededMessage(budget)));
+            return;
+        }
+
+        // Defer ephemerally — we'll post the answer into a thread via RestClient,
+        // then send an ephemeral confirmation back to the invoker.
+        await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
+
+        var question = message.Content;
+        if (string.IsNullOrWhiteSpace(question))
+            question = message.Embeds.FirstOrDefault()?.Description;
+
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            await FollowupAsync(new InteractionMessageProperties
+            {
+                Content = "That message doesn't seem to have any text content to ask about.",
+                Flags = MessageFlags.Ephemeral
+            });
+            return;
+        }
+
+        List<AttachmentInfo> attachments = message.Attachments
+            .Where(a => a.ContentType is not null)
+            .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
+            .ToList();
+
+        var result = await geminiService.AskAsync([new GeminiMessage("user", question)], attachments);
+
+        if (result.IsFailure || result.Value is null)
+        {
+            await FollowupAsync(new InteractionMessageProperties
+            {
+                Content = "Something went wrong — couldn't get a response. Try again later.",
+                Flags = MessageFlags.Ephemeral
+            });
+            return;
+        }
+
+        var geminiResponse = result.Value;
+
+        if (!geminiResponse.ShouldRespond)
+        {
+            var rejection = geminiResponse.IsPiracy
+                ? "Sorry, I can't help with that — it looks piracy-related."
+                : "That doesn't seem to be a qBitTorrent question.";
+
+            var rejectionSent = await FollowupAsync(new InteractionMessageProperties
+            {
+                Embeds = [new EmbedProperties
+                {
+                    Description = rejection,
+                    Color = new Color(158, 158, 158),
+                    Footer = EmbedResponseFormatter.Footer
+                }],
+                Flags = MessageFlags.Ephemeral
+            });
+            await feedbackService.RecordResponseAsync(
+                geminiResponse, question, rejectionSent.Id,
+                Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
+            return;
+        }
+
+        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+
+        // Try to spawn a thread on the target message. If we're already inside a thread
+        // (Discord disallows nesting) or thread creation fails, fall back to posting
+        // the answer as a reply to the target message in-place.
+        ulong responseChannelId = message.ChannelId;
+        ulong? threadId = null;
+        if (Context.Channel is not GuildThread)
+        {
+            try
+            {
+                var thread = await restClient.CreateGuildThreadAsync(
+                    message.ChannelId, message.Id,
+                    new GuildThreadFromMessageProperties(ThreadNaming.Build(question)));
+                responseChannelId = thread.Id;
+                threadId = thread.Id;
+            }
+            catch
+            {
+                // Fall back: reply in-place in the parent channel.
+            }
+        }
+
+        var sent = await restClient.SendMessageAsync(responseChannelId, new MessageProperties
+        {
+            Embeds = embeds,
+            Components = [EmbedResponseFormatter.FeedbackButtons],
+            MessageReference = threadId is null ? MessageReferenceProperties.Reply(message.Id) : null
+        });
+
+        await feedbackService.RecordResponseAsync(
+            geminiResponse, question, sent.Id, responseChannelId,
+            Context.User.Id, Context.Guild?.Id);
+
+        if (threadId is not null && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, threadId.Value, ThreadNaming.Build(geminiResponse.Topic));
+
+        await FollowupAsync(new InteractionMessageProperties
+        {
+            Content = threadId is null
+                ? "Posted the answer as a reply (couldn't spawn a thread here)."
+                : $"Posted the answer in <#{threadId.Value}>.",
+            Flags = MessageFlags.Ephemeral
+        });
     }
 }

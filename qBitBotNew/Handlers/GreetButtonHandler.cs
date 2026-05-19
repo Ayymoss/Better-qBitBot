@@ -127,12 +127,14 @@ public sealed class GreetButtonHandler(
 
         // Spawn a thread on the anchor message so the answer stays out of the parent channel.
         var responseChannelId = channelId;
+        ulong? spawnedThreadId = null;
         try
         {
             var thread = await restClient.CreateGuildThreadAsync(
                 channelId, anchorMessageId,
-                new GuildThreadFromMessageProperties(BuildThreadName(anchor.Content)));
+                new GuildThreadFromMessageProperties(ThreadNaming.Build(anchor.Content)));
             responseChannelId = thread.Id;
+            spawnedThreadId = thread.Id;
         }
         catch
         {
@@ -190,16 +192,11 @@ public sealed class GreetButtonHandler(
 
         await feedbackService.RecordResponseAsync(
             geminiResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
+
+        if (spawnedThreadId is not null && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, spawnedThreadId.Value, ThreadNaming.Build(geminiResponse.Topic));
     }
 
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
-
-    private static string BuildThreadName(string question)
-    {
-        var trimmed = question.Replace('\n', ' ').Trim();
-        if (string.IsNullOrEmpty(trimmed))
-            return "qBitBot question";
-        return trimmed.Length <= 80 ? trimmed : trimmed[..77] + "...";
-    }
 }

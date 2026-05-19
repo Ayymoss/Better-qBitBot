@@ -43,6 +43,12 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
         - Background context messages are formatted as "[HH:mm] Name: text". Focus on answering
           [Current question] or [Primary question]; the rest is background.
 
+        ## Thread topic
+        - Always set `topic` to a short, contextual title (≤80 chars) that summarises the
+          user's actual problem — used as the Discord thread name. Sentence case, no quotes,
+          no trailing punctuation. Prefer the symptom over a generic restating of the
+          question ("WebUI port conflict on Windows" not "Question about qBitTorrent").
+
         ## Resources and URLs
         - Only include URLs you are certain exist. Use base URLs to known pages
           (e.g., "https://github.com/qbittorrent/qBittorrent/wiki/Frequently-Asked-Questions").
@@ -87,9 +93,14 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                 type = "array",
                 items = new { type = "string" },
                 description = "Specific questions to ask the user when critical environment details are missing for troubleshooting. Empty when the answer is complete or the question is simple."
+            },
+            topic = new
+            {
+                type = "string",
+                description = "Short descriptive title (max 80 chars) used as a Discord thread name. Sentence case, no quotes, no trailing punctuation. Examples: 'Torrent stuck at 99% with red peers', 'WebUI port conflict on Windows', 'qBit not seeding behind VPN'. Empty if intent is not on_topic."
             }
         },
-        required = new[] { "intent", "confidence", "response", "resources", "reasoning", "follow_up_questions" }
+        required = new[] { "intent", "confidence", "response", "resources", "reasoning", "follow_up_questions", "topic" }
     };
 
     public async Task<Result<GeminiResponse>> AskAsync(List<GeminiMessage> conversation, List<AttachmentInfo>? attachments = null, CancellationToken ct = default)

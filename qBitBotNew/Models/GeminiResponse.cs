@@ -35,6 +35,9 @@ public sealed record GeminiResponse
     [JsonPropertyName("follow_up_questions")]
     public List<string> FollowUpQuestions { get; init; } = [];
 
+    [JsonPropertyName("topic")]
+    public string Topic { get; init; } = string.Empty;
+
     // Populated post-deserialization from Gemini thinking parts (where part.thought == true).
     // Not part of the structured-output schema.
     [JsonIgnore]

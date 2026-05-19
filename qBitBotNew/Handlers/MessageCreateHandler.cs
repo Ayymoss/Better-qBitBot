@@ -246,7 +246,8 @@ public sealed partial class MessageCreateHandler(
         {
             var botMention = $"<@{gatewayClient.Id}>";
             var stripped = message.Content.Replace(botMention, "").Trim();
-            var threadName = BuildThreadName(stripped);
+            // Initial name from the question — renamed once Gemini returns a topic.
+            var threadName = ThreadNaming.Build(stripped);
             var thread = await restClient.CreateGuildThreadAsync(
                 message.ChannelId,
                 message.Id,
@@ -261,14 +262,6 @@ public sealed partial class MessageCreateHandler(
             LogThreadCreationFailed(ex, message.ChannelId);
             return message.ChannelId;
         }
-    }
-
-    private static string BuildThreadName(string question)
-    {
-        var trimmed = question.Replace('\n', ' ').Trim();
-        if (string.IsNullOrEmpty(trimmed))
-            return "qBitBot question";
-        return trimmed.Length <= 80 ? trimmed : trimmed[..77] + "...";
     }
 
     private async Task<(List<GeminiMessage> Conversation, List<AttachmentInfo> Attachments)> GatherUserContext(
@@ -497,6 +490,11 @@ public sealed partial class MessageCreateHandler(
                 message.Author.Id,
                 message.GuildId,
                 ct);
+
+            // If we spawned a thread (targetChannelId differs from invoking channel) rename it
+            // to Gemini's chosen topic for searchability. Best-effort; failure ignored.
+            if (!sameChannel && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
+                await ThreadNaming.TryRenameAsync(restClient, targetChannelId, ThreadNaming.Build(geminiResponse.Topic), ct);
         }
         catch (Exception ex)
         {
