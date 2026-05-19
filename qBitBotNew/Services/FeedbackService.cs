@@ -63,9 +63,17 @@ public sealed partial class FeedbackService(
         var helpfulCount = await db.Feedback.CountAsync(f => f.Helpful == true, ct);
 
         var window7d = db.Feedback.Where(f => f.CreatedAt >= cutoff7d);
-        var highCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.High, ct);
-        var mediumCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.Medium, ct);
-        var lowCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.Low, ct);
+        var window7dOnTopic = window7d.Where(f => f.Intent == "on_topic");
+
+        var onTopicCount = await window7d.CountAsync(f => f.Intent == "on_topic", ct);
+        var piracyCount = await window7d.CountAsync(f => f.Intent == "piracy", ct);
+        var offTopicCount = await window7d.CountAsync(f => f.Intent == "off_topic", ct);
+
+        // Confidence + low-prompt stats only make sense for on-topic rows; rejections are
+        // always low-confidence by their nature and would skew the breakdown.
+        var highCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.High, ct);
+        var mediumCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.Medium, ct);
+        var lowCount = await window7dOnTopic.CountAsync(f => f.Confidence == ConfidenceLevel.Low, ct);
 
         var tokenTotals = await window7d
             .GroupBy(_ => 1)
@@ -78,7 +86,7 @@ public sealed partial class FeedbackService(
             })
             .FirstOrDefaultAsync(ct);
 
-        var lowPrompts = await window7d
+        var lowPrompts = await window7dOnTopic
             .Where(f => f.Confidence == ConfidenceLevel.Low)
             .OrderByDescending(f => f.CreatedAt)
             .Take(5)
@@ -91,6 +99,9 @@ public sealed partial class FeedbackService(
             responsesAll,
             ratedCount,
             helpfulCount,
+            onTopicCount,
+            piracyCount,
+            offTopicCount,
             highCount,
             mediumCount,
             lowCount,

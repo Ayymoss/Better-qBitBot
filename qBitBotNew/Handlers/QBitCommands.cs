@@ -7,8 +7,29 @@ using qBitBotNew.Services;
 
 namespace qBitBotNew.Handlers;
 
-public sealed class QBitCommands(GeminiService geminiService, FeedbackService feedbackService) : ApplicationCommandModule<ApplicationCommandContext>
+public sealed class QBitCommands(
+    GeminiService geminiService,
+    FeedbackService feedbackService,
+    RateLimiterService rateLimiterService) : ApplicationCommandModule<ApplicationCommandContext>
 {
+    private static InteractionMessageProperties BudgetExceededMessage(BudgetCheck budget)
+    {
+        var resetIn = budget.ResetAt.HasValue
+            ? budget.ResetAt.Value - DateTimeOffset.UtcNow
+            : TimeSpan.Zero;
+        var resetStr = resetIn >= TimeSpan.FromHours(1)
+            ? $"{(int)resetIn.TotalHours}h {resetIn.Minutes}m"
+            : $"{Math.Max(1, (int)resetIn.TotalMinutes)}m";
+
+        return new InteractionMessageProperties
+        {
+            Content = $"You've used **{budget.Used}/{budget.Limit}** qBitBot requests in the last 24 hours. "
+                    + $"Your next slot opens in **{resetStr}**.\n"
+                    + "For longer discussions, try [Gemini](<https://gemini.google.com/>) or [Claude](<https://claude.ai/>) directly.",
+            Flags = MessageFlags.Ephemeral
+        };
+    }
+
     [SlashCommand("qbit-stats", "Show qBitBot usage statistics")]
     public async Task Stats()
     {
@@ -49,7 +70,13 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                 },
                 new EmbedFieldProperties
                 {
-                    Name = "Confidence (7d)",
+                    Name = "Intent (7d)",
+                    Value = $"On-topic: **{s.OnTopicCount7d}** • Off-topic: **{s.OffTopicCount7d}** • Piracy: **{s.PiracyCount7d}**",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Confidence on-topic (7d)",
                     Value = conf7d == 0
                         ? "_No on-topic responses this week._"
                         : $"High: **{s.HighCount7d}** • Medium: **{s.MediumCount7d}** • Low: **{s.LowCount7d}**",
@@ -68,7 +95,7 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                     Inline = false
                 }
             ],
-            Footer = new EmbedFooterProperties { Text = "Only on-topic responses are tracked. Times are UTC." }
+            Footer = new EmbedFooterProperties { Text = "Every Gemini call counts toward the daily budget. Times are UTC." }
         };
 
         await FollowupAsync(new InteractionMessageProperties
@@ -135,6 +162,13 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
     public async Task Ask(
         [SlashCommandParameter(Name = "question", Description = "Your qBitTorrent question")] string question)
     {
+        var budget = await rateLimiterService.CheckBudgetAsync(Context.User.Id);
+        if (!budget.Allowed)
+        {
+            await RespondAsync(InteractionCallback.Message(BudgetExceededMessage(budget)));
+            return;
+        }
+
         // Defer since Gemini takes a while
         await RespondAsync(InteractionCallback.DeferredMessage());
 
@@ -157,7 +191,7 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                 ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                 : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
-            await FollowupAsync(new InteractionMessageProperties
+            var rejectionSent = await FollowupAsync(new InteractionMessageProperties
             {
                 Embeds = [new EmbedProperties
                 {
@@ -166,6 +200,9 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                     Footer = EmbedResponseFormatter.Footer
                 }]
             });
+            await feedbackService.RecordResponseAsync(
+                geminiResponse, question, rejectionSent.Id,
+                Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
             return;
         }
 
@@ -188,6 +225,13 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
     [MessageCommand("Ask qBitBot")]
     public async Task AskFromMessage(RestMessage message)
     {
+        var budget = await rateLimiterService.CheckBudgetAsync(Context.User.Id);
+        if (!budget.Allowed)
+        {
+            await RespondAsync(InteractionCallback.Message(BudgetExceededMessage(budget)));
+            return;
+        }
+
         await RespondAsync(InteractionCallback.DeferredMessage());
 
         var question = message.Content;
@@ -231,7 +275,7 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                 ? "Sorry, I can't help with that."
                 : "That doesn't seem to be a qBitTorrent question.";
 
-            await FollowupAsync(new InteractionMessageProperties
+            var rejectionSent = await FollowupAsync(new InteractionMessageProperties
             {
                 Embeds = [new EmbedProperties
                 {
@@ -240,6 +284,9 @@ public sealed class QBitCommands(GeminiService geminiService, FeedbackService fe
                     Footer = EmbedResponseFormatter.Footer
                 }]
             });
+            await feedbackService.RecordResponseAsync(
+                geminiResponse, question, rejectionSent.Id,
+                Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
             return;
         }
 

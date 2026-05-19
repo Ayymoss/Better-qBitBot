@@ -64,9 +64,10 @@ public sealed partial class MessageCreateHandler(
 
     private async Task HandleReplyToBot(Message message, RestMessage botMessage, CancellationToken ct = default)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
+        var budget = await rateLimiterService.CheckBudgetAsync(message.Author.Id, ct);
+        if (!budget.Allowed)
         {
-            await NotifyCooldown(message, remaining, ct);
+            await NotifyBudgetExceeded(message, budget, ct);
             return;
         }
 
@@ -104,9 +105,10 @@ public sealed partial class MessageCreateHandler(
 
     private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage, CancellationToken ct = default)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
+        var budget = await rateLimiterService.CheckBudgetAsync(message.Author.Id, ct);
+        if (!budget.Allowed)
         {
-            await NotifyCooldown(message, remaining, ct);
+            await NotifyBudgetExceeded(message, budget, ct);
             return;
         }
 
@@ -118,9 +120,10 @@ public sealed partial class MessageCreateHandler(
 
     private async Task HandleDirectMention(Message message, CancellationToken ct = default)
     {
-        if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
+        var budget = await rateLimiterService.CheckBudgetAsync(message.Author.Id, ct);
+        if (!budget.Allowed)
         {
-            await NotifyCooldown(message, remaining, ct);
+            await NotifyBudgetExceeded(message, budget, ct);
             return;
         }
 
@@ -187,7 +190,7 @@ public sealed partial class MessageCreateHandler(
                 contextParts.Add(FormatContextMessage(m, botUserId));
         }
 
-        // Build the conversation as: background context (user) → ack (model) → current question (user)
+        // Build the conversation as: background context (user) -> ack (model) -> current question (user)
         List<GeminiMessage> conversation = [];
 
         if (contextParts.Count > 0)
@@ -245,8 +248,10 @@ public sealed partial class MessageCreateHandler(
                 return;
 
             var geminiResponse = result.Value;
+            var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
 
-            // For direct invocations (@mention / reply-to), give feedback on why we can't help
+            // For direct invocations (@mention / reply-to), give feedback on why we can't help.
+            // Rejections are still persisted so they count toward the daily turn budget.
             if (!geminiResponse.ShouldRespond)
             {
                 if (isDirectInvocation)
@@ -255,7 +260,7 @@ public sealed partial class MessageCreateHandler(
                         ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                         : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
-                    await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+                    var rejectionMsg = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
                     {
                         Embeds = [new EmbedProperties
                         {
@@ -265,6 +270,10 @@ public sealed partial class MessageCreateHandler(
                         }],
                         MessageReference = MessageReferenceProperties.Reply(message.Id)
                     }, null, ct);
+
+                    await feedbackService.RecordResponseAsync(
+                        geminiResponse, prompt, rejectionMsg.Id,
+                        message.ChannelId, message.Author.Id, message.GuildId, ct);
                 }
                 return;
             }
@@ -282,7 +291,6 @@ public sealed partial class MessageCreateHandler(
             // FeedbackButtonHandler can look up the row when the user clicks.
             if (lastSent is not null)
             {
-                var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
                 await feedbackService.RecordResponseAsync(
                     geminiResponse,
                     prompt,
@@ -309,59 +317,28 @@ public sealed partial class MessageCreateHandler(
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-    private async Task NotifyCooldown(Message message, TimeSpan remaining, CancellationToken ct = default)
+    private async Task NotifyBudgetExceeded(Message message, BudgetCheck budget, CancellationToken ct = default)
     {
         try
         {
-            var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+            var resetIn = budget.ResetAt.HasValue
+                ? budget.ResetAt.Value - DateTimeOffset.UtcNow
+                : TimeSpan.Zero;
+            var resetStr = resetIn >= TimeSpan.FromHours(1)
+                ? $"{(int)resetIn.TotalHours}h {resetIn.Minutes}m"
+                : $"{Math.Max(1, (int)resetIn.TotalMinutes)}m";
 
-            await restClient.AddMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"), null, ct);
-
-            var notice = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
+            await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
             {
-                Content = $"You're on cooldown — try again in **{seconds}s**.\nFor longer conversations, try [Gemini](<https://gemini.google.com/>) directly.",
+                Content = $"You've used **{budget.Used}/{budget.Limit}** qBitBot requests in the last 24 hours. "
+                        + $"Your next slot opens in **{resetStr}**.\n"
+                        + "For longer discussions, try [Gemini](<https://gemini.google.com/>) or [Claude](<https://claude.ai/>) directly.",
                 MessageReference = MessageReferenceProperties.Reply(message.Id)
             }, null, ct);
-
-            // Clean up the notice and reaction on a background task \u2014 survives request cancellation
-            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining);
         }
         catch (Exception ex)
         {
-            LogCooldownNotificationFailed(ex);
-        }
-    }
-
-    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining)
-    {
-        try
-        {
-            // Hold the notice and \u23f3 reaction for the full cooldown duration so the user
-            // doesn't see the message vanish while still being rate-limited.
-            if (remaining > TimeSpan.Zero)
-                await Task.Delay(remaining);
-
-            try
-            {
-                await restClient.DeleteMessageAsync(channelId, noticeId);
-            }
-            catch (Exception ex)
-            {
-                LogDeleteCooldownNoticeFailed(ex);
-            }
-
-            try
-            {
-                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"));
-            }
-            catch (Exception ex)
-            {
-                LogRemoveCooldownReactionFailed(ex);
-            }
-        }
-        catch (Exception ex)
-        {
-            LogCooldownCleanupFailed(ex);
+            LogBudgetNotificationFailed(ex);
         }
     }
 
@@ -388,17 +365,8 @@ public sealed partial class MessageCreateHandler(
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to respond to message {MessageId} from user {UserId}")]
     private partial void LogResponseFailed(Exception ex, ulong messageId, ulong userId);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send cooldown notification")]
-    private partial void LogCooldownNotificationFailed(Exception ex);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to delete cooldown notice message")]
-    private partial void LogDeleteCooldownNoticeFailed(Exception ex);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to remove cooldown reaction")]
-    private partial void LogRemoveCooldownReactionFailed(Exception ex);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Cooldown cleanup failed unexpectedly")]
-    private partial void LogCooldownCleanupFailed(Exception ex);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send budget-exceeded notification")]
+    private partial void LogBudgetNotificationFailed(Exception ex);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to send error reply")]
     private partial void LogErrorReplyFailed(Exception ex);
