@@ -48,6 +48,59 @@ public sealed partial class FeedbackService(
         }
     }
 
+    public async Task<StatsSnapshot> GetStatsAsync(CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var now = DateTimeOffset.UtcNow;
+        var cutoff24h = now - TimeSpan.FromHours(24);
+        var cutoff7d = now - TimeSpan.FromDays(7);
+
+        var responsesLast24h = await db.Feedback.CountAsync(f => f.CreatedAt >= cutoff24h, ct);
+        var responsesLast7d = await db.Feedback.CountAsync(f => f.CreatedAt >= cutoff7d, ct);
+        var responsesAll = await db.Feedback.CountAsync(ct);
+
+        var ratedCount = await db.Feedback.CountAsync(f => f.Helpful != null, ct);
+        var helpfulCount = await db.Feedback.CountAsync(f => f.Helpful == true, ct);
+
+        var window7d = db.Feedback.Where(f => f.CreatedAt >= cutoff7d);
+        var highCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.High, ct);
+        var mediumCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.Medium, ct);
+        var lowCount = await window7d.CountAsync(f => f.Confidence == ConfidenceLevel.Low, ct);
+
+        var tokenTotals = await window7d
+            .GroupBy(_ => 1)
+            .Select(g => new
+            {
+                Prompt = g.Sum(f => (long)f.PromptTokens),
+                Cached = g.Sum(f => (long)f.CachedTokens),
+                Output = g.Sum(f => (long)f.OutputTokens),
+                Thoughts = g.Sum(f => (long)f.ThoughtTokens)
+            })
+            .FirstOrDefaultAsync(ct);
+
+        var lowPrompts = await window7d
+            .Where(f => f.Confidence == ConfidenceLevel.Low)
+            .OrderByDescending(f => f.CreatedAt)
+            .Take(5)
+            .Select(f => f.Prompt)
+            .ToListAsync(ct);
+
+        return new StatsSnapshot(
+            responsesLast24h,
+            responsesLast7d,
+            responsesAll,
+            ratedCount,
+            helpfulCount,
+            highCount,
+            mediumCount,
+            lowCount,
+            tokenTotals?.Prompt ?? 0,
+            tokenTotals?.Cached ?? 0,
+            tokenTotals?.Output ?? 0,
+            tokenTotals?.Thoughts ?? 0,
+            lowPrompts);
+    }
+
     public async Task<string?> GetThoughtSummaryAsync(ulong botMessageId, CancellationToken ct = default)
     {
         try

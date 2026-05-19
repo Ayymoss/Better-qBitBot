@@ -9,6 +9,75 @@ namespace qBitBotNew.Handlers;
 
 public sealed class QBitCommands(GeminiService geminiService, FeedbackService feedbackService) : ApplicationCommandModule<ApplicationCommandContext>
 {
+    [SlashCommand("qbit-stats", "Show qBitBot usage statistics")]
+    public async Task Stats()
+    {
+        await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
+
+        var s = await feedbackService.GetStatsAsync();
+
+        var helpfulPct = s.RatedCount > 0 ? s.HelpfulCount * 100.0 / s.RatedCount : 0;
+        var conf7d = s.HighCount7d + s.MediumCount7d + s.LowCount7d;
+
+        var lowList = s.LowConfidencePrompts7d.Count == 0
+            ? "_None — Gemini was confident in every answer this week._"
+            : string.Join("\n", s.LowConfidencePrompts7d.Select(p =>
+            {
+                var trimmed = p.Replace('\n', ' ').Trim();
+                return trimmed.Length > 100 ? "- " + trimmed[..97] + "..." : "- " + trimmed;
+            }));
+
+        var embed = new EmbedProperties
+        {
+            Title = "qBitBot stats",
+            Color = new Color(67, 160, 71),
+            Fields =
+            [
+                new EmbedFieldProperties
+                {
+                    Name = "Responses",
+                    Value = $"24h: **{s.ResponsesLast24h}** • 7d: **{s.ResponsesLast7d}** • All: **{s.ResponsesAll}**",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Feedback",
+                    Value = s.RatedCount == 0
+                        ? "_No ratings yet._"
+                        : $"👍 **{s.HelpfulCount}** / 👎 **{s.RatedCount - s.HelpfulCount}** ({helpfulPct:0.0}% helpful, {s.RatedCount} rated)",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Confidence (7d)",
+                    Value = conf7d == 0
+                        ? "_No on-topic responses this week._"
+                        : $"High: **{s.HighCount7d}** • Medium: **{s.MediumCount7d}** • Low: **{s.LowCount7d}**",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Tokens (7d)",
+                    Value = $"Prompt: **{s.PromptTokens7d:N0}** • Cached: **{s.CachedTokens7d:N0}** • Output: **{s.OutputTokens7d:N0}** • Thoughts: **{s.ThoughtTokens7d:N0}**",
+                    Inline = false
+                },
+                new EmbedFieldProperties
+                {
+                    Name = "Recent low-confidence prompts (7d)",
+                    Value = lowList.Length > 1024 ? lowList[..1021] + "..." : lowList,
+                    Inline = false
+                }
+            ],
+            Footer = new EmbedFooterProperties { Text = "Only on-topic responses are tracked. Times are UTC." }
+        };
+
+        await FollowupAsync(new InteractionMessageProperties
+        {
+            Embeds = [embed],
+            Flags = MessageFlags.Ephemeral
+        });
+    }
+
     [SlashCommand("help", "How to use qBitBot")]
     public Task Help()
     {
