@@ -11,7 +11,7 @@ using qBitBotNew.Services;
 
 namespace qBitBotNew.Handlers;
 
-public sealed class MessageCreateHandler(
+public sealed partial class MessageCreateHandler(
     GeminiService geminiService,
     RateLimiterService rateLimiterService,
     RestClient restClient,
@@ -58,16 +58,16 @@ public sealed class MessageCreateHandler(
         // No auto-response — bot only responds when explicitly invoked
     }
 
-    private async Task HandleReplyToBot(Message message, RestMessage botMessage)
+    private async Task HandleReplyToBot(Message message, RestMessage botMessage, CancellationToken ct = default)
     {
         if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await NotifyCooldown(message, remaining);
+            await NotifyCooldown(message, remaining, ct);
             return;
         }
 
         // Walk the reply chain to build multi-turn conversation history
-        var chain = new List<(bool IsBot, string Content)>();
+        List<(bool IsBot, string Content)> chain = [];
         var current = botMessage as RestMessage;
         while (current is not null)
         {
@@ -84,7 +84,7 @@ public sealed class MessageCreateHandler(
         chain.Reverse();
 
         // Build proper multi-turn conversation for Gemini
-        var conversation = new List<GeminiMessage>();
+        List<GeminiMessage> conversation = [];
         foreach (var (isBot, content) in chain)
             conversation.Add(new GeminiMessage(isBot ? "model" : "user", content));
 
@@ -92,48 +92,48 @@ public sealed class MessageCreateHandler(
         conversation.Add(new GeminiMessage("user", message.Content));
 
         var attachments = ExtractAttachments(message);
-        await RespondWithConversation(message, conversation, attachments);
+        await RespondWithConversation(message, conversation, attachments, ct: ct);
     }
 
-    private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage)
+    private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage, CancellationToken ct = default)
     {
         if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await NotifyCooldown(message, remaining);
+            await NotifyCooldown(message, remaining, ct);
             return;
         }
 
         // Gather context from the target user's messages, always including the replied-to message
-        var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage);
+        var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
 
-        await RespondWithConversation(message, conversation, attachments);
+        await RespondWithConversation(message, conversation, attachments, ct: ct);
     }
 
-    private async Task HandleDirectMention(Message message)
+    private async Task HandleDirectMention(Message message, CancellationToken ct = default)
     {
         if (rateLimiterService.IsRateLimited(message.Author.Id, out var remaining))
         {
-            await NotifyCooldown(message, remaining);
+            await NotifyCooldown(message, remaining, ct);
             return;
         }
 
         // Gather context from the invoking user's messages only
-        var (conversation, attachments) = await GatherUserContext(message, message.Author.Id);
+        var (conversation, attachments) = await GatherUserContext(message, message.Author.Id, ct: ct);
 
-        await RespondWithConversation(message, conversation, attachments);
+        await RespondWithConversation(message, conversation, attachments, ct: ct);
     }
 
     private async Task<(List<GeminiMessage> Conversation, List<AttachmentInfo> Attachments)> GatherUserContext(
-        Message invokingMessage, ulong contextUserId, RestMessage? anchorMessage = null)
+        Message invokingMessage, ulong contextUserId, RestMessage? anchorMessage = null, CancellationToken ct = default)
     {
         var botUserId = gatewayClient.Id;
 
         // Fetch recent channel messages
-        var recentMessages = await restClient.GetMessagesAroundAsync(invokingMessage.ChannelId, invokingMessage.Id, 50);
+        var recentMessages = await restClient.GetMessagesAroundAsync(invokingMessage.ChannelId, invokingMessage.Id, 50, null, ct);
         var now = DateTimeOffset.UtcNow;
 
         // IDs to exclude from the time-filtered search (handled separately)
-        var excludeIds = new HashSet<ulong> { invokingMessage.Id };
+        HashSet<ulong> excludeIds = [invokingMessage.Id];
         if (anchorMessage is not null)
             excludeIds.Add(anchorMessage.Id);
 
@@ -152,7 +152,7 @@ public sealed class MessageCreateHandler(
             attachments.AddRange(ExtractAttachments(m));
 
         // Build background context string
-        var contextParts = new List<string>();
+        List<string> contextParts = [];
         var recentThreshold = TimeSpan.FromHours(2);
 
         // Always include the anchor message first if present (the replied-to message, regardless of age)
@@ -181,7 +181,7 @@ public sealed class MessageCreateHandler(
         }
 
         // Build the conversation as: background context (user) → ack (model) → current question (user)
-        var conversation = new List<GeminiMessage>();
+        List<GeminiMessage> conversation = [];
 
         if (contextParts.Count > 0)
         {
@@ -227,22 +227,24 @@ public sealed class MessageCreateHandler(
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
 
-    private async Task RespondWithConversation(Message message, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true)
+    private async Task RespondWithConversation(Message message, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true, CancellationToken ct = default)
     {
         try
         {
             using var typing = restClient.EnterTypingScope(message.ChannelId);
-            var result = await geminiService.AskAsync(conversation, attachments);
+            var result = await geminiService.AskAsync(conversation, attachments, ct);
 
-            if (result is null)
+            if (result.IsFailure || result.Value is null)
                 return;
 
+            var geminiResponse = result.Value;
+
             // For direct invocations (@mention / reply-to), give feedback on why we can't help
-            if (!result.ShouldRespond)
+            if (!geminiResponse.ShouldRespond)
             {
                 if (isDirectInvocation)
                 {
-                    var rejection = result.IsPiracy
+                    var rejection = geminiResponse.IsPiracy
                         ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                         : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
@@ -255,23 +257,23 @@ public sealed class MessageCreateHandler(
                             Footer = EmbedResponseFormatter.Footer
                         }],
                         MessageReference = MessageReferenceProperties.Reply(message.Id)
-                    });
+                    }, null, ct);
                 }
                 return;
             }
 
-            var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(result);
+            var responseMessages = EmbedResponseFormatter.FormatEmbedResponse(geminiResponse);
             for (var i = 0; i < responseMessages.Count; i++)
             {
                 if (i == 0)
                     responseMessages[i].MessageReference = MessageReferenceProperties.Reply(message.Id);
-                await restClient.SendMessageAsync(message.ChannelId, responseMessages[i]);
+                await restClient.SendMessageAsync(message.ChannelId, responseMessages[i], null, ct);
             }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to respond to message {MessageId} from user {UserId}", message.Id, message.Author.Id);
-            await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex);
+            LogResponseFailed(ex, message.Id, message.Author.Id);
+            await SendErrorReply(message.ChannelId, message.Id, "direct invocation", ex, ct);
         }
     }
 
@@ -284,65 +286,68 @@ public sealed class MessageCreateHandler(
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-    private async Task NotifyCooldown(Message message, TimeSpan remaining)
+    private async Task NotifyCooldown(Message message, TimeSpan remaining, CancellationToken ct = default)
     {
         try
         {
             var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
 
-            // Add hourglass reaction and send a visible cooldown notice
-            await restClient.AddMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"));
+            await restClient.AddMessageReactionAsync(message.ChannelId, message.Id, new ReactionEmojiProperties("\u23f3"), null, ct);
 
             var notice = await restClient.SendMessageAsync(message.ChannelId, new MessageProperties
             {
                 Content = $"You're on cooldown — try again in **{seconds}s**.\nFor longer conversations, try [Gemini](<https://gemini.google.com/>) directly.",
                 MessageReference = MessageReferenceProperties.Reply(message.Id)
-            });
+            }, null, ct);
 
             // Clean up the notice and reaction on a background task
-            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining);
+            _ = CleanUpCooldownAsync(message.ChannelId, message.Id, notice.Id, remaining, CancellationToken.None);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to send cooldown notification");
+            LogCooldownNotificationFailed(ex);
         }
     }
 
-    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining)
+    private async Task CleanUpCooldownAsync(ulong channelId, ulong messageId, ulong noticeId, TimeSpan remaining, CancellationToken ct)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(5));
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
 
             try
             {
-                await restClient.DeleteMessageAsync(channelId, noticeId);
+                await restClient.DeleteMessageAsync(channelId, noticeId, null, ct);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to delete cooldown notice message");
+                LogDeleteCooldownNoticeFailed(ex);
             }
 
             var reactionDelay = remaining - TimeSpan.FromSeconds(5);
             if (reactionDelay > TimeSpan.Zero)
-                await Task.Delay(reactionDelay);
+                await Task.Delay(reactionDelay, ct);
 
             try
             {
-                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"));
+                await restClient.DeleteCurrentUserMessageReactionAsync(channelId, messageId, new ReactionEmojiProperties("\u23f3"), null, ct);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to remove cooldown reaction");
+                LogRemoveCooldownReactionFailed(ex);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignore cancellation
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Cooldown cleanup failed unexpectedly");
+            LogCooldownCleanupFailed(ex);
         }
     }
 
-    private async Task SendErrorReply(ulong channelId, ulong replyToMessageId, string context, Exception ex)
+    private async Task SendErrorReply(ulong channelId, ulong replyToMessageId, string context, Exception ex, CancellationToken ct = default)
     {
         try
         {
@@ -354,12 +359,29 @@ public sealed class MessageCreateHandler(
             {
                 Content = $"Something went wrong while processing your request ({context}). Please ping {contact} if this keeps happening.\n-# {errorInfo}",
                 MessageReference = MessageReferenceProperties.Reply(replyToMessageId)
-            });
+            }, null, ct);
         }
         catch (Exception replyEx)
         {
-            logger.LogError(replyEx, "Failed to send error reply");
+            LogErrorReplyFailed(replyEx);
         }
     }
 
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to respond to message {MessageId} from user {UserId}")]
+    private partial void LogResponseFailed(Exception ex, ulong messageId, ulong userId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send cooldown notification")]
+    private partial void LogCooldownNotificationFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to delete cooldown notice message")]
+    private partial void LogDeleteCooldownNoticeFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to remove cooldown reaction")]
+    private partial void LogRemoveCooldownReactionFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Cooldown cleanup failed unexpectedly")]
+    private partial void LogCooldownCleanupFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to send error reply")]
+    private partial void LogErrorReplyFailed(Exception ex);
 }

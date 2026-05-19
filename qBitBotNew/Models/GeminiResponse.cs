@@ -15,25 +15,25 @@ public enum ConfidenceLevel
     High
 }
 
-public sealed class GeminiResponse
+public sealed record GeminiResponse
 {
     [JsonPropertyName("intent")]
-    public string Intent { get; set; } = "off_topic";
+    public string Intent { get; init; } = "off_topic";
 
     [JsonPropertyName("confidence")]
-    public ConfidenceLevel Confidence { get; set; } = ConfidenceLevel.Low;
+    public ConfidenceLevel Confidence { get; init; } = ConfidenceLevel.Low;
 
     [JsonPropertyName("response")]
-    public string Response { get; set; } = string.Empty;
+    public string Response { get; init; } = string.Empty;
 
     [JsonPropertyName("resources")]
-    public List<string> Resources { get; set; } = [];
+    public List<string> Resources { get; init; } = [];
 
     [JsonPropertyName("reasoning")]
-    public string Reasoning { get; set; } = string.Empty;
+    public string Reasoning { get; init; } = string.Empty;
 
     [JsonPropertyName("follow_up_questions")]
-    public List<string> FollowUpQuestions { get; set; } = [];
+    public List<string> FollowUpQuestions { get; init; } = [];
 
     public bool ShouldRespond => Intent is "on_topic";
     public bool IsPiracy => Intent is "piracy";

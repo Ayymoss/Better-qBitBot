@@ -53,7 +53,7 @@ public static class EmbedResponseFormatter
             }];
         }
 
-        var messages = new List<MessageProperties>();
+        List<MessageProperties> messages = [];
         var remaining = text;
 
         while (remaining.Length > 0)

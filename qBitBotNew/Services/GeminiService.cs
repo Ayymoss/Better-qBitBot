@@ -7,7 +7,7 @@ using qBitBotNew.Models;
 
 namespace qBitBotNew.Services;
 
-public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> geminiConfig, IOptions<BotConfig> botConfig, ILogger<GeminiService> logger)
+public sealed partial class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> geminiConfig, IOptions<BotConfig> botConfig, ILogger<GeminiService> logger)
 {
     private const string SystemPrompt = """
         You are a qBitTorrent support assistant in a Discord server. ONLY answer qBitTorrent Desktop client, WebUI, and API questions.
@@ -59,7 +59,7 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
             confidence = new
             {
                 type = "string",
-                @enum = new[] { "high", "medium", "low" }
+                @enum = new[] { "low", "medium", "high" }
             },
             response = new
             {
@@ -87,48 +87,46 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
         required = new[] { "intent", "confidence", "response", "resources", "reasoning", "follow_up_questions" }
     };
 
-    public async Task<GeminiResponse?> AskAsync(List<GeminiMessage> conversation, List<AttachmentInfo>? attachments = null)
+    public async Task<Result<GeminiResponse>> AskAsync(List<GeminiMessage> conversation, List<AttachmentInfo>? attachments = null, CancellationToken ct = default)
     {
         var cfg = geminiConfig.Value;
         var maxAttachmentBytes = botConfig.Value.MaxAttachmentBytes;
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{cfg.Model}:generateContent?key={cfg.ApiKey}";
 
-        logger.LogDebug("Gemini request — {TurnCount} turn(s), last: {LastMessage}",
-            conversation.Count, conversation[^1].Content);
+        LogRequest(conversation.Count, conversation[^1].Content);
 
         // Build content turns from conversation
-        var contents = new List<object>();
+        List<object> contents = [];
         var imagesAttached = 0;
         var imagesSkipped = 0;
 
         for (var i = 0; i < conversation.Count; i++)
         {
             var turn = conversation[i];
-            var parts = new List<object> { new { text = turn.Content } };
+            List<object> parts = [new { text = turn.Content }];
 
             // Attach images to the last user message
             if (i == conversation.Count - 1 && turn.Role is "user" && attachments is { Count: > 0 })
             {
-                logger.LogDebug("Processing {Count} attachment(s)", attachments.Count);
+                LogProcessingAttachments(attachments.Count);
 
                 foreach (var attachment in attachments)
                 {
                     if (!IsImageContentType(attachment.ContentType))
                     {
                         imagesSkipped++;
-                        logger.LogDebug("Skipping non-image attachment: {ContentType} — {Url}", attachment.ContentType, attachment.Url);
+                        LogSkippingNonImage(attachment.ContentType, attachment.Url);
                         continue;
                     }
 
                     try
                     {
-                        var imageBytes = await httpClient.GetByteArrayAsync(attachment.Url);
+                        var imageBytes = await httpClient.GetByteArrayAsync(attachment.Url, ct);
 
                         if (imageBytes.Length > maxAttachmentBytes)
                         {
                             imagesSkipped++;
-                            logger.LogWarning("Skipping oversized attachment: {Size} bytes exceeds {Max} byte limit — {Url}",
-                                imageBytes.Length, maxAttachmentBytes, attachment.Url);
+                            LogSkippingOversized(imageBytes.Length, maxAttachmentBytes, attachment.Url);
                             continue;
                         }
 
@@ -142,11 +140,11 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
                             }
                         });
                         imagesAttached++;
-                        logger.LogDebug("Attached image: {ContentType}, {Size} bytes — {Url}", attachment.ContentType, imageBytes.Length, attachment.Url);
+                        LogAttachedImage(attachment.ContentType, imageBytes.Length, attachment.Url);
                     }
                     catch (Exception ex)
                     {
-                        logger.LogWarning(ex, "Failed to download attachment: {Url}", attachment.Url);
+                        LogDownloadAttachmentFailed(ex, attachment.Url);
                     }
                 }
             }
@@ -154,8 +152,7 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
             contents.Add(new { role = turn.Role, parts });
         }
 
-        logger.LogDebug("Sending to Gemini — {Turns} turn(s), {Images} image(s) attached, {Skipped} skipped",
-            contents.Count, imagesAttached, imagesSkipped);
+        LogSendingToGemini(contents.Count, imagesAttached, imagesSkipped);
 
         var requestPayload = new
         {
@@ -171,10 +168,10 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
 
         try
         {
-            var response = await httpClient.PostAsJsonAsync(url, requestPayload);
+            var response = await httpClient.PostAsJsonAsync(url, requestPayload, ct);
             response.EnsureSuccessStatusCode();
 
-            var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+            var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: ct);
 
             var text = json
                 .GetProperty("candidates")[0]
@@ -185,40 +182,76 @@ public sealed class GeminiService(HttpClient httpClient, IOptions<GeminiConfig> 
 
             if (string.IsNullOrWhiteSpace(text))
             {
-                logger.LogWarning("Gemini returned empty text response");
-                return null;
+                LogEmptyResponse();
+                return Result<GeminiResponse>.Failure("Gemini returned an empty response.");
             }
 
-            logger.LogDebug("Gemini raw response: {RawJson}", text);
+            LogRawResponse(text);
 
-            GeminiResponse? result;
             try
             {
-                result = JsonSerializer.Deserialize<GeminiResponse>(text);
+                var result = JsonSerializer.Deserialize<GeminiResponse>(text);
+                if (result is null)
+                {
+                    LogDeserializationNull();
+                    return Result<GeminiResponse>.Failure("Failed to deserialize Gemini response.");
+                }
+
+                LogSuccess(result.Intent, result.Confidence, result.Reasoning, result.Response.Length, result.Resources.Count);
+                return result;
             }
             catch (JsonException jsonEx)
             {
-                logger.LogError(jsonEx, "Failed to deserialize Gemini response: {RawJson}", text);
-                return null;
+                LogDeserializationFailed(jsonEx, text);
+                return Result<GeminiResponse>.Failure($"Failed to parse Gemini response JSON: {jsonEx.Message}");
             }
-
-            if (result is not null)
-            {
-                logger.LogDebug("Gemini result — Intent: {Intent}, Confidence: {Confidence}, Reasoning: {Reasoning}",
-                    result.Intent, result.Confidence, result.Reasoning);
-                logger.LogDebug("Gemini result — Response length: {Length}, Resources: {Resources}",
-                    result.Response.Length, result.Resources.Count);
-            }
-
-            return result;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Gemini API call failed");
-            return null;
+            LogApiCallFailed(ex);
+            return Result<GeminiResponse>.Failure($"Gemini API call failed: {ex.Message}");
         }
     }
 
     private static bool IsImageContentType(string contentType) =>
         contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Gemini request — {TurnCount} turn(s), last: {LastMessage}")]
+    private partial void LogRequest(int turnCount, string lastMessage);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Processing {Count} attachment(s)")]
+    private partial void LogProcessingAttachments(int count);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping non-image attachment: {ContentType} — {Url}")]
+    private partial void LogSkippingNonImage(string contentType, string url);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Skipping oversized attachment: {Size} bytes exceeds {Max} byte limit — {Url}")]
+    private partial void LogSkippingOversized(long size, long max, string url);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Attached image: {ContentType}, {Size} bytes — {Url}")]
+    private partial void LogAttachedImage(string contentType, int size, string url);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to download attachment: {Url}")]
+    private partial void LogDownloadAttachmentFailed(Exception ex, string url);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Sending to Gemini — {Turns} turn(s), {Images} image(s) attached, {Skipped} skipped")]
+    private partial void LogSendingToGemini(int turns, int images, int skipped);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Gemini returned empty text response")]
+    private partial void LogEmptyResponse();
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Gemini raw response: {RawJson}")]
+    private partial void LogRawResponse(string rawJson);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to deserialize Gemini response: {RawJson}")]
+    private partial void LogDeserializationFailed(Exception ex, string rawJson);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Gemini returned null after deserialization")]
+    private partial void LogDeserializationNull();
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Gemini result — Intent: {Intent}, Confidence: {Confidence}, Reasoning: {Reasoning}, Length: {Length}, Resources: {Resources}")]
+    private partial void LogSuccess(string intent, ConfidenceLevel confidence, string reasoning, int length, int resources);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Gemini API call failed")]
+    private partial void LogApiCallFailed(Exception ex);
 }

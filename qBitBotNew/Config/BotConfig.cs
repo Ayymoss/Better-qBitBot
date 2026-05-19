@@ -1,10 +1,10 @@
 namespace qBitBotNew.Config;
 
-public sealed class BotConfig
+public sealed record BotConfig
 {
-    public int NewUserThresholdHours { get; set; } = 24;
-    public int MessageAggregationWindowSeconds { get; set; } = 60;
-    public int CooldownSeconds { get; set; } = 60;
-    public string ErrorContactHandle { get; set; } = "@ayymoss";
-    public long MaxAttachmentBytes { get; set; } = 10 * 1024 * 1024; // 10 MB
+    public int NewUserThresholdHours { get; init; } = 24;
+    public int MessageAggregationWindowSeconds { get; init; } = 60;
+    public int CooldownSeconds { get; init; } = 60;
+    public string ErrorContactHandle { get; init; } = "@ayymoss";
+    public long MaxAttachmentBytes { get; init; } = 10 * 1024 * 1024; // 10 MB
 }

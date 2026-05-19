@@ -19,18 +19,20 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
 
         var result = await geminiService.AskAsync([new GeminiMessage("user", question)]);
 
-        if (result is null)
+        if (result.IsFailure || result.Value is null)
         {
             await FollowupAsync(new InteractionMessageProperties
             {
-                Content = "Something went wrong — couldn't get a response. Try again later."
+                Content = $"Something went wrong — {result.Error ?? "couldn't get a response"}. Try again later."
             });
             return;
         }
 
-        if (!result.ShouldRespond)
+        var geminiResponse = result.Value;
+
+        if (!geminiResponse.ShouldRespond)
         {
-            var rejection = result.IsPiracy
+            var rejection = geminiResponse.IsPiracy
                 ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                 : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
@@ -46,7 +48,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             return;
         }
 
-        var embed = EmbedResponseFormatter.BuildSingleEmbed(result);
+        var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
         await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],
@@ -76,25 +78,27 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             return;
         }
 
-        var attachments = message.Attachments
+        List<AttachmentInfo> attachments = message.Attachments
             .Where(a => a.ContentType is not null)
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
         var result = await geminiService.AskAsync([new GeminiMessage("user", question)], attachments);
 
-        if (result is null)
+        if (result.IsFailure || result.Value is null)
         {
             await FollowupAsync(new InteractionMessageProperties
             {
-                Content = "Something went wrong — couldn't get a response. Try again later."
+                Content = $"Something went wrong — {result.Error ?? "couldn't get a response"}. Try again later."
             });
             return;
         }
 
-        if (!result.ShouldRespond)
+        var geminiResponse = result.Value;
+
+        if (!geminiResponse.ShouldRespond)
         {
-            var rejection = result.IsPiracy
+            var rejection = geminiResponse.IsPiracy
                 ? "Sorry, I can't help with that."
                 : "That doesn't seem to be a qBitTorrent question.";
 
@@ -110,7 +114,7 @@ public sealed class QBitCommands(GeminiService geminiService) : ApplicationComma
             return;
         }
 
-        var embed = EmbedResponseFormatter.BuildSingleEmbed(result);
+        var embed = EmbedResponseFormatter.BuildSingleEmbed(geminiResponse);
         await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = [embed],

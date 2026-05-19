@@ -6,7 +6,7 @@ namespace qBitBotNew.Services;
 
 public sealed class RateLimiterService(IOptions<BotConfig> config)
 {
-    private readonly ConcurrentDictionary<ulong, DateTimeOffset> _lastInvocation = new();
+    private readonly ConcurrentDictionary<ulong, DateTimeOffset> _lastInvocation = [];
 
     public bool IsRateLimited(ulong userId, out TimeSpan remaining)
     {
