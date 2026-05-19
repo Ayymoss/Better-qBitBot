@@ -1,5 +1,8 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
@@ -9,6 +12,7 @@ using NetCord.Hosting.Services.ComponentInteractions;
 using NetCord.Services.ComponentInteractions;
 using qBitBotNew.Config;
 using qBitBotNew.Handlers;
+using qBitBotNew.Persistence;
 using qBitBotNew.Services;
 using Serilog;
 
@@ -30,6 +34,16 @@ try
     // Bind configuration sections
     builder.Services.Configure<BotConfig>(builder.Configuration.GetSection("Bot"));
     builder.Services.Configure<GeminiConfig>(builder.Configuration.GetSection("Gemini"));
+    builder.Services.Configure<PersistenceConfig>(builder.Configuration.GetSection("Persistence"));
+
+    // SQLite persistence — file path resolved at startup. Directory is created on demand
+    // so the bot works on first run without manual setup.
+    var persistenceCfg = builder.Configuration.GetSection("Persistence").Get<PersistenceConfig>() ?? new PersistenceConfig();
+    var dbPath = Path.GetFullPath(persistenceCfg.DatabaseFile);
+    var dbDir = Path.GetDirectoryName(dbPath);
+    if (!string.IsNullOrEmpty(dbDir))
+        Directory.CreateDirectory(dbDir);
+    builder.Services.AddDbContext<AppDbContext>(opts => opts.UseSqlite($"Data Source={dbPath}"));
 
     // Discord gateway with required intents
     // Token is bound automatically from "Discord:Token" in config (appsettings, user-secrets, env vars)
@@ -64,6 +78,13 @@ try
     builder.Services.AddGatewayHandler<MessageCreateHandler>();
 
     var host = builder.Build();
+
+    // Apply EF Core migrations on startup so a fresh deployment self-provisions its schema.
+    using (var scope = host.Services.CreateScope())
+    {
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.MigrateAsync();
+    }
 
     // Register application command modules and component interaction modules
     host.AddModules(typeof(Program).Assembly);

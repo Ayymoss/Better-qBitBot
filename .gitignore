@@ -7,3 +7,11 @@ riderModule.iml
 .claude/
 qBitBotNew.sln.DotSettings.user
 .antigravitycli/
+
+# Local SQLite runtime data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
