@@ -94,21 +94,19 @@ public static class EmbedResponseFormatter
             embeds.Add(new EmbedProperties { Description = chunk, Color = answerColor });
         }
 
-        // Questions embed — one field per question so each stands distinct.
+        // Questions embed — bold-numbered list in the description so each "N. text" stays
+        // on one line. Field name/value is always two-line in Discord, which read oddly.
         if (result.FollowUpQuestions is { Count: > 0 } qs)
         {
-            var fields = qs.Select((q, i) => new EmbedFieldProperties
-            {
-                Name = $"{i + 1}.",
-                Value = q.Length > 1024 ? q[..1021] + "..." : q,
-                Inline = false
-            }).Take(25).ToArray(); // Discord field cap is 25 per embed.
+            var body = string.Join("\n", qs.Select((q, i) => $"**{i + 1}.** {q}"));
+            if (body.Length > MaxEmbedDescription)
+                body = body[..(MaxEmbedDescription - 4)] + "\n...";
 
             embeds.Add(new EmbedProperties
             {
                 Title = "❓ To help further, please share",
                 Color = QuestionsColor,
-                Fields = fields
+                Description = body
             });
         }
 
