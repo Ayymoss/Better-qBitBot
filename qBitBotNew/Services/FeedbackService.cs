@@ -48,6 +48,23 @@ public sealed partial class FeedbackService(
         }
     }
 
+    public async Task<string?> GetThoughtSummaryAsync(ulong botMessageId, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(ct);
+            return await db.Feedback
+                .Where(f => f.BotMessageId == botMessageId)
+                .Select(f => f.ThoughtSummary)
+                .SingleOrDefaultAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            LogPersistResponseFailed(ex, botMessageId);
+            return null;
+        }
+    }
+
     public async Task RecordRatingAsync(ulong botMessageId, ulong userId, ulong channelId, bool helpful, string? reason = null, CancellationToken ct = default)
     {
         LogFeedback(botMessageId, userId, channelId, helpful);

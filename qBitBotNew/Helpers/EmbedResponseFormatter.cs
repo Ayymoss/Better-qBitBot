@@ -30,7 +30,8 @@ public static class EmbedResponseFormatter
 
     public static readonly ActionRowProperties FeedbackButtons = new([
         new ButtonProperties("feedback_helpful", "Helpful", ButtonStyle.Success),
-        new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger)
+        new ButtonProperties("feedback_not_helpful", "Not Helpful", ButtonStyle.Danger),
+        new ButtonProperties("feedback_why", "Why this answer?", ButtonStyle.Secondary)
     ]);
 
     private const int MaxEmbedDescription = 4096;

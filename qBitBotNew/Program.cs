@@ -65,8 +65,9 @@ try
     // Application commands (slash commands, message commands)
     builder.Services.AddApplicationCommands();
 
-    // Component interactions (button handlers)
+    // Component interactions (button + modal submit handlers)
     builder.Services.AddComponentInteractions<ButtonInteraction, ButtonInteractionContext>();
+    builder.Services.AddComponentInteractions<ModalInteraction, ModalInteractionContext>();
 
     // HTTP client for Gemini API
     builder.Services.AddHttpClient<GeminiService>();
