@@ -4,8 +4,9 @@ public sealed class ResponseCache
 {
     public long Id { get; set; }
 
-    public ulong ChannelId { get; set; }
-    public ulong BotMessageId { get; set; }
+    // Discord snowflakes stored as long — see comment on FeedbackEntry.
+    public long ChannelId { get; set; }
+    public long BotMessageId { get; set; }
 
     public string Prompt { get; set; } = string.Empty;
     public string Response { get; set; } = string.Empty;

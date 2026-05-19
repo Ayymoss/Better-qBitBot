@@ -24,10 +24,10 @@ public sealed partial class FeedbackService(
             await using var db = await dbFactory.CreateDbContextAsync(ct);
             db.Feedback.Add(new FeedbackEntry
             {
-                BotMessageId = botMessageId,
-                ChannelId = channelId,
-                UserId = userId,
-                GuildId = guildId,
+                BotMessageId = botMessageId.ToDbId(),
+                ChannelId = channelId.ToDbId(),
+                UserId = userId.ToDbId(),
+                GuildId = guildId.ToDbId(),
                 Prompt = prompt,
                 Response = response.Response,
                 Intent = response.Intent,
@@ -117,17 +117,19 @@ public sealed partial class FeedbackService(
     // bot-managed conversation and reply without requiring @mention.
     public async Task<bool> HasBotRespondedInChannelAsync(ulong channelId, CancellationToken ct = default)
     {
+        var id = channelId.ToDbId();
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        return await db.Feedback.AnyAsync(f => f.ChannelId == channelId, ct);
+        return await db.Feedback.AnyAsync(f => f.ChannelId == id, ct);
     }
 
     public async Task<string?> GetThoughtSummaryAsync(ulong botMessageId, CancellationToken ct = default)
     {
         try
         {
+            var id = botMessageId.ToDbId();
             await using var db = await dbFactory.CreateDbContextAsync(ct);
             return await db.Feedback
-                .Where(f => f.BotMessageId == botMessageId)
+                .Where(f => f.BotMessageId == id)
                 .Select(f => f.ThoughtSummary)
                 .SingleOrDefaultAsync(ct);
         }
@@ -144,8 +146,9 @@ public sealed partial class FeedbackService(
 
         try
         {
+            var id = botMessageId.ToDbId();
             await using var db = await dbFactory.CreateDbContextAsync(ct);
-            var entry = await db.Feedback.SingleOrDefaultAsync(f => f.BotMessageId == botMessageId, ct);
+            var entry = await db.Feedback.SingleOrDefaultAsync(f => f.BotMessageId == id, ct);
             if (entry is null)
             {
                 LogRatingForUnknownMessage(botMessageId);

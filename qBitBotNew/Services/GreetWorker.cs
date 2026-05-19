@@ -56,8 +56,9 @@ public sealed partial class GreetWorker(
 
             // Has the user ever interacted with the bot already? If so, don't greet —
             // we only want to onboard genuinely new arrivals once.
+            var userIdLong = pending.UserId.ToDbId();
             await using var db = await dbFactory.CreateDbContextAsync(ct);
-            var hasFeedback = await db.Feedback.AnyAsync(f => f.UserId == pending.UserId, ct);
+            var hasFeedback = await db.Feedback.AnyAsync(f => f.UserId == userIdLong, ct);
             if (hasFeedback)
             {
                 greetService.MarkGreeted(pending.UserId);

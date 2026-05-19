@@ -6,12 +6,14 @@ public sealed class FeedbackEntry
 {
     public long Id { get; set; }
 
-    // Discord message ID of the bot's response message. Used for button-click lookup.
-    public ulong BotMessageId { get; set; }
+    // Discord snowflakes are stored as signed long because EF Core's SQLite provider can't
+    // translate LINQ expressions involving ulong. They fit comfortably in 63 bits.
+    // Callers cast at the boundary: unchecked((long)ulongId).
+    public long BotMessageId { get; set; }
 
-    public ulong UserId { get; set; }
-    public ulong ChannelId { get; set; }
-    public ulong? GuildId { get; set; }
+    public long UserId { get; set; }
+    public long ChannelId { get; set; }
+    public long? GuildId { get; set; }
 
     public string Prompt { get; set; } = string.Empty;
     public string Response { get; set; } = string.Empty;

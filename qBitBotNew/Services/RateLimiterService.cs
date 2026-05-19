@@ -14,10 +14,11 @@ public sealed class RateLimiterService(
     {
         var limit = config.Value.DailyTurnBudget;
         var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(24);
+        var id = userId.ToDbId();
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var recentTimestamps = await db.Feedback
-            .Where(f => f.UserId == userId && f.CreatedAt >= cutoff)
+            .Where(f => f.UserId == id && f.CreatedAt >= cutoff)
             .OrderBy(f => f.CreatedAt)
             .Select(f => f.CreatedAt)
             .ToListAsync(ct);
