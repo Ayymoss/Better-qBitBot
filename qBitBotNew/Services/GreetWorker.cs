@@ -89,8 +89,8 @@ public sealed partial class GreetWorker(
             Embeds = [new EmbedProperties
             {
                 Description =
-                    "Hi! I'm **qBitBot**, a Gemini-powered assistant for qBitTorrent client questions. "
-                  + "Want me to take a look at what you posted above and have a go at answering?",
+                    "Hey — looks like you might have a qBitTorrent question above. "
+                  + "Want me to take a look and try to help?",
                 Color = new Color(67, 160, 71)
             }],
             Components = [new ActionRowProperties([

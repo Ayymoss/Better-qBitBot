@@ -200,6 +200,11 @@ public sealed partial class MessageCreateHandler(
             return;
         }
 
+        // Someone's running the bot on this user's behalf — suppress any pending greet
+        // for the target user so they don't get a "want me to look at this?" prompt later.
+        if (!targetMessage.Author.IsBot && targetMessage.Author.Id != message.Author.Id)
+            greetService.MarkGreeted(targetMessage.Author.Id);
+
         // Gather context from the target user's messages, always including the replied-to message
         var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
 

@@ -11,6 +11,7 @@ public sealed class QBitCommands(
     GeminiService geminiService,
     FeedbackService feedbackService,
     RateLimiterService rateLimiterService,
+    GreetService greetService,
     RestClient restClient) : ApplicationCommandModule<ApplicationCommandContext>
 {
     private static string TruncateForPlaceholder(string text, int max) =>
@@ -280,6 +281,11 @@ public sealed class QBitCommands(
             return;
         }
 
+        // Someone's running the bot on this user's behalf — suppress any pending greet
+        // for them so they don't get a "want me to look at this?" prompt 10 minutes later.
+        if (!message.Author.IsBot && message.Author.Id != Context.User.Id)
+            greetService.MarkGreeted(message.Author.Id);
+
         await RespondAsync(InteractionCallback.DeferredMessage());
 
         var question = message.Content;
@@ -366,6 +372,11 @@ public sealed class QBitCommands(
             await RespondAsync(InteractionCallback.Message(BudgetExceededMessage(budget)));
             return;
         }
+
+        // Someone's running the bot on this user's behalf — suppress any pending greet
+        // for them so they don't get a "want me to look at this?" prompt 10 minutes later.
+        if (!message.Author.IsBot && message.Author.Id != Context.User.Id)
+            greetService.MarkGreeted(message.Author.Id);
 
         // Defer ephemerally — we'll post the answer into a thread via RestClient,
         // then send an ephemeral confirmation back to the invoker.
