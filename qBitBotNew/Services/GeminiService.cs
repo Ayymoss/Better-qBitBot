@@ -181,7 +181,7 @@ public sealed partial class GeminiService(HttpClient httpClient, IOptions<Gemini
                 responseJsonSchema = ResponseSchema,
                 thinkingConfig = new
                 {
-                    thinkingLevel = "low",
+                    thinkingLevel = "medium",
                     includeThoughts = true
                 }
             }

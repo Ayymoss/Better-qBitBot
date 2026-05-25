@@ -85,7 +85,6 @@ public sealed partial class GreetWorker(
 
         var props = new MessageProperties
         {
-            Content = $"<@{pending.UserId}>",
             Embeds = [new EmbedProperties
             {
                 Description =

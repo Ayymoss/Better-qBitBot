@@ -56,7 +56,7 @@ public sealed class GreetButtonHandler(
                 opts.Components = [];
                 opts.Embeds = [new EmbedProperties
                 {
-                    Description = "Opened a thread with the answer — see below.",
+                    Description = "Answered in a thread above. Please continue the conversation there.",
                     Color = new Color(67, 160, 71)
                 }];
             });
