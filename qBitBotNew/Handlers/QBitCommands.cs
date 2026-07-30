@@ -3,6 +3,7 @@ using NetCord.Rest;
 using NetCord.Services.ApplicationCommands;
 using qBitBotNew.Helpers;
 using qBitBotNew.Models;
+using qBitBotNew.Persistence.Entities;
 using qBitBotNew.Services;
 
 namespace qBitBotNew.Handlers;
@@ -281,10 +282,10 @@ public sealed class QBitCommands(
             return;
         }
 
-        // Someone's running the bot on this user's behalf — suppress any pending greet
-        // for them so they don't get a "want me to look at this?" prompt 10 minutes later.
+        // Someone's running the bot on this user's behalf — suppress the greet for them
+        // so they don't get a "want me to look at this?" prompt 10 minutes later.
         if (!message.Author.IsBot && message.Author.Id != Context.User.Id)
-            greetService.MarkGreeted(message.Author.Id);
+            await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked);
 
         await RespondAsync(InteractionCallback.DeferredMessage());
 
@@ -373,10 +374,10 @@ public sealed class QBitCommands(
             return;
         }
 
-        // Someone's running the bot on this user's behalf — suppress any pending greet
-        // for them so they don't get a "want me to look at this?" prompt 10 minutes later.
+        // Someone's running the bot on this user's behalf — suppress the greet for them
+        // so they don't get a "want me to look at this?" prompt 10 minutes later.
         if (!message.Author.IsBot && message.Author.Id != Context.User.Id)
-            greetService.MarkGreeted(message.Author.Id);
+            await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked);
 
         // Defer ephemerally — we'll post the answer into a thread via RestClient,
         // then send an ephemeral confirmation back to the invoker.

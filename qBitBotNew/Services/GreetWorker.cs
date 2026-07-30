@@ -6,6 +6,7 @@ using NetCord;
 using NetCord.Rest;
 using qBitBotNew.Config;
 using qBitBotNew.Persistence;
+using qBitBotNew.Persistence.Entities;
 
 namespace qBitBotNew.Services;
 
@@ -61,11 +62,13 @@ public sealed partial class GreetWorker(
             var hasFeedback = await db.Feedback.AnyAsync(f => f.UserId == userIdLong, ct);
             if (hasFeedback)
             {
-                greetService.MarkGreeted(pending.UserId);
+                await greetService.SuppressAsync(pending.UserId, GreetSuppressionReason.Invoked, ct);
                 continue;
             }
 
-            if (!greetService.MarkGreeted(pending.UserId))
+            // Check-and-set: records the permanent suppression before the message goes out,
+            // so nothing can offer this user a greet a second time.
+            if (!await greetService.TryClaimGreetAsync(pending.UserId, ct))
                 continue;
 
             try

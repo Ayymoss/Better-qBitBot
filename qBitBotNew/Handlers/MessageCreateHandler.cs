@@ -8,6 +8,7 @@ using NetCord.Rest;
 using qBitBotNew.Config;
 using qBitBotNew.Helpers;
 using qBitBotNew.Models;
+using qBitBotNew.Persistence.Entities;
 using qBitBotNew.Services;
 
 namespace qBitBotNew.Handlers;
@@ -35,19 +36,19 @@ public sealed partial class MessageCreateHandler(
         var ct = lifetime.ApplicationStopping;
         var botUserId = gatewayClient.Id;
 
-        // If this message is a reply to someone we're considering greeting, cancel the
-        // pending greet — humans are already engaged, we don't need to butt in.
-        if (message.ReferencedMessage is { } refMsg && !refMsg.Author.IsBot)
-            greetService.Cancel(refMsg.Author.Id);
+        // A human replying to — or @mentioning — someone permanently bars that person from
+        // the greet offer. Once other users are engaged with them we never butt in, not on
+        // this message and not on any later one they post.
+        await SuppressGreetForEngagedUsersAsync(message, botUserId, ct);
 
         // Track new users so the GreetWorker can offer the bot to them after a quiet period.
-        // Their first invocation of the bot through any path (including the greet button) will
-        // record a Feedback row, which suppresses future greet attempts for them.
+        // The offer is one-shot per user: sending it (or any bot invocation touching them)
+        // writes a permanent suppression row, so they're never tracked again.
         if (botConfig.Value.GreetEnabled
             && message.Author is GuildUser guildUser
             && guildUser.JoinedAt is { } joinedAt
             && DateTimeOffset.UtcNow - joinedAt < TimeSpan.FromHours(botConfig.Value.NewUserThresholdHours)
-            && !greetService.IsAlreadyGreeted(message.Author.Id))
+            && !await greetService.IsSuppressedAsync(message.Author.Id, ct))
         {
             greetService.TrackOrUpdate(message.Author.Id, message.ChannelId, message.Id);
         }
@@ -88,6 +89,29 @@ public sealed partial class MessageCreateHandler(
         }
 
         // No auto-response — bot only responds when explicitly invoked
+    }
+
+    // Permanently suppresses the greet for anyone this message engages with: the author of a
+    // replied-to message, plus any @mentioned humans. Self-replies and self-mentions don't
+    // count — the point is that *somebody else* is already talking to them.
+    private async Task SuppressGreetForEngagedUsersAsync(Message message, ulong botUserId, CancellationToken ct)
+    {
+        if (!botConfig.Value.GreetEnabled)
+            return;
+
+        if (message.ReferencedMessage is { } refMsg
+            && !refMsg.Author.IsBot
+            && refMsg.Author.Id != message.Author.Id)
+        {
+            await greetService.SuppressAsync(refMsg.Author.Id, GreetSuppressionReason.HumanEngaged, ct);
+        }
+
+        foreach (var mentioned in message.MentionedUsers)
+        {
+            if (mentioned.IsBot || mentioned.Id == botUserId || mentioned.Id == message.Author.Id)
+                continue;
+            await greetService.SuppressAsync(mentioned.Id, GreetSuppressionReason.HumanEngaged, ct);
+        }
     }
 
     // Channel-type cache so we don't issue a REST GetChannel for every message in a
@@ -157,6 +181,8 @@ public sealed partial class MessageCreateHandler(
             return;
         }
 
+        await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
+
         // Walk the reply chain to build multi-turn conversation history
         List<(bool IsBot, string Content)> chain = [];
         var current = botMessage as RestMessage;
@@ -200,10 +226,12 @@ public sealed partial class MessageCreateHandler(
             return;
         }
 
-        // Someone's running the bot on this user's behalf — suppress any pending greet
-        // for the target user so they don't get a "want me to look at this?" prompt later.
+        // Someone's running the bot on this user's behalf — suppress the greet for the
+        // target user so they don't get a "want me to look at this?" prompt later.
         if (!targetMessage.Author.IsBot && targetMessage.Author.Id != message.Author.Id)
-            greetService.MarkGreeted(targetMessage.Author.Id);
+            await greetService.SuppressAsync(targetMessage.Author.Id, GreetSuppressionReason.Invoked, ct);
+
+        await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
 
         // Gather context from the target user's messages, always including the replied-to message
         var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
@@ -220,6 +248,9 @@ public sealed partial class MessageCreateHandler(
             await NotifyBudgetExceeded(message, budget, ct);
             return;
         }
+
+        // They've invoked the bot themselves — no need to ever offer.
+        await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
 
         // Gather context from the invoking user's messages only
         var (conversation, attachments) = await GatherUserContext(message, message.Author.Id, ct: ct);

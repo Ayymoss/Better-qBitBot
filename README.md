@@ -40,7 +40,7 @@ Configuration is provided via `appsettings.json`, environment variables, or [use
 | `Gemini:Model` | Gemini model to use | `gemini-3.5-flash` |
 | `Bot:NewUserThresholdHours` | Hours since join to consider a user "new" (for greeting) | `24` |
 | `Bot:DailyTurnBudget` | Gemini calls per user per sliding 24h window | `20` |
-| `Bot:GreetEnabled` | Offer the bot to new users after a quiet period | `true` |
+| `Bot:GreetEnabled` | Offer the bot to new users after a quiet period (once per user, ever) | `true` |
 | `Bot:GreetWaitMinutes` | Minutes to wait after a new user's last message before greeting | `10` |
 | `Bot:ErrorContactHandle` | Discord handle to ping in error messages | `@ayymoss` |
 | `Bot:MaxAttachmentBytes` | Max size of an image attachment sent to Gemini (bytes) | `10485760` |

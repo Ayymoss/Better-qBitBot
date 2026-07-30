@@ -7,6 +7,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public DbSet<FeedbackEntry> Feedback => Set<FeedbackEntry>();
     public DbSet<ResponseCache> ResponseCache => Set<ResponseCache>();
+    public DbSet<GreetSuppression> GreetSuppressions => Set<GreetSuppression>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -23,6 +24,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             b.HasIndex(c => c.CreatedAt);
             b.HasIndex(c => c.BotMessageId);
+        });
+
+        modelBuilder.Entity<GreetSuppression>(b =>
+        {
+            b.HasKey(g => g.UserId);
+            b.Property(g => g.UserId).ValueGeneratedNever();
+            b.Property(g => g.Reason).HasConversion<string>().HasMaxLength(32);
         });
     }
 }
