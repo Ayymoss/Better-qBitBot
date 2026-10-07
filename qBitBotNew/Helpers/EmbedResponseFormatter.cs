@@ -18,7 +18,7 @@ public static class EmbedResponseFormatter
         VerifyHint,
         "Tip: reply to this message to ask a follow-up.",
         "Tip: use /qbit <question> for one-off questions.",
-        "Tip: react 👍 / 👎 to rate this answer.",
+        "Tip: rate this answer with the Helpful / Not Helpful buttons.",
         "Tip: right-click any message → Apps → Ask qBitBot."
     ];
 
@@ -28,7 +28,7 @@ public static class EmbedResponseFormatter
     public static EmbedFooterProperties BuildHintFooter() =>
         new() { Text = FooterHints[Random.Shared.Next(FooterHints.Length)] };
 
-    // Shown while Gemini is generating. Mix of progress phrases and quick tips so the
+    // Shown while Claude is generating. Mix of progress phrases and quick tips so the
     // ~10s wait feels less dead. Picked at random per request.
     private static readonly string[] PlaceholderLines =
     [
@@ -40,12 +40,16 @@ public static class EmbedResponseFormatter
         "_Working on it..._",
         "_Tip while you wait: reply to my answers to ask a follow-up._",
         "_Tip while you wait: use `/qbit` for one-off questions._",
-        "_Tip while you wait: react 👍 / 👎 once I'm done — it helps tune future answers._",
+        "_Tip while you wait: rate my answer with the buttons under it — it helps tune future answers._",
         "_Tip while you wait: right-click any message → Apps → Ask qBitBot._",
         "_Tip while you wait: my responses are AI-generated — verify before applying._",
         "_Have a screenshot of your settings? Attach it next time — I can read images._",
         "_Pro tip: in a thread with me, you can ping me without `@`-mentioning._"
     ];
+
+    public static bool IsPlaceholder(string description) => PlaceholderLines.Contains(description);
+
+    public const string QuestionsTitle = "❓ To help further, please share";
 
     public static EmbedProperties BuildPlaceholderEmbed() => new()
     {
@@ -61,6 +65,13 @@ public static class EmbedResponseFormatter
 
     private const int MaxEmbedDescription = 4096;
 
+    // Discord rejects a whole message (400 MAX_EMBED_SIZE_EXCEEDED) when the combined title,
+    // description, field and footer text of all its embeds exceeds 6000 characters.
+    private const int MaxMessageEmbedChars = 6000;
+    private const int MaxQuestionsChars = 1500;
+    private const int MaxResourcesChars = 1000;
+    private const string TrimmedNote = "\n\n_…answer trimmed to fit Discord. Reply to ask for the rest._";
+
     public static Color GetConfidenceColor(ConfidenceLevel confidence) => confidence switch
     {
         ConfidenceLevel.High => new Color(67, 160, 71),     // green
@@ -73,11 +84,12 @@ public static class EmbedResponseFormatter
 
     /// <summary>
     /// Builds the embed list for a single message: [answer..., questions?, resources?].
-    /// Answer is split across multiple embeds if it exceeds 4096 chars. Footer hint lands
-    /// on the LAST embed. Caller attaches FeedbackButtons to the message itself.
-    /// Total embeds always stays under Discord's 10-per-message limit.
+    /// The answer gets whatever is left of Discord's 6000-char per-message embed budget after the
+    /// questions, resources and footer, is trimmed at a line break if it doesn't fit, and is split
+    /// across embeds at 4096 chars. Footer hint lands on the LAST embed. Caller attaches
+    /// FeedbackButtons to the message itself.
     /// </summary>
-    public static List<EmbedProperties> BuildEmbeds(GeminiResponse result)
+    public static List<EmbedProperties> BuildEmbeds(BotResponse result)
     {
         var answerColor = GetConfidenceColor(result.Confidence);
 
@@ -85,49 +97,56 @@ public static class EmbedResponseFormatter
             ? "I'm not entirely sure about this, but here are some resources that might help:"
             : result.Response.Replace("\\n", "\n");
 
-        List<EmbedProperties> embeds = [];
-
-        // Answer embeds — split at \n boundaries to stay under 4096. Cap at 8 to leave room
-        // for the questions + resources embeds.
-        foreach (var chunk in SplitForEmbed(answerText, MaxEmbedDescription).Take(8))
-        {
-            embeds.Add(new EmbedProperties { Description = chunk, Color = answerColor });
-        }
+        List<EmbedProperties> trailing = [];
 
         // Questions embed — bold-numbered list in the description so each "N. text" stays
         // on one line. Field name/value is always two-line in Discord, which read oddly.
         if (result.FollowUpQuestions is { Count: > 0 } qs)
         {
-            var body = string.Join("\n", qs.Select((q, i) => $"**{i + 1}.** {q}"));
-            if (body.Length > MaxEmbedDescription)
-                body = body[..(MaxEmbedDescription - 4)] + "\n...";
-
-            embeds.Add(new EmbedProperties
+            trailing.Add(new EmbedProperties
             {
-                Title = "❓ To help further, please share",
+                Title = QuestionsTitle,
                 Color = QuestionsColor,
-                Description = body
+                Description = Truncate(string.Join("\n", qs.Select((q, i) => $"**{i + 1}.** {q}")), MaxQuestionsChars)
             });
         }
 
-        // Resources embed.
         if (result.Resources is { Count: > 0 } resources)
         {
-            var body = string.Join("\n", resources.Select(r => $"- <{r}>"));
-            if (body.Length > MaxEmbedDescription)
-                body = body[..(MaxEmbedDescription - 4)] + "\n...";
-
-            embeds.Add(new EmbedProperties
+            trailing.Add(new EmbedProperties
             {
                 Title = "📚 Resources",
                 Color = ResourcesColor,
-                Description = body
+                Description = Truncate(string.Join("\n", resources.Select(r => $"- <{r}>")), MaxResourcesChars)
             });
         }
 
-        // Hint footer on the last embed.
-        embeds[^1].Footer = BuildHintFooter();
+        var footer = BuildHintFooter();
+        var used = trailing.Sum(e => (e.Title?.Length ?? 0) + (e.Description?.Length ?? 0)) + (footer.Text?.Length ?? 0);
+        answerText = FitToBudget(answerText, MaxMessageEmbedChars - used);
+
+        List<EmbedProperties> embeds = [];
+        foreach (var chunk in SplitForEmbed(answerText, MaxEmbedDescription))
+            embeds.Add(new EmbedProperties { Description = chunk, Color = answerColor });
+        embeds.AddRange(trailing);
+
+        embeds[^1].Footer = footer;
         return embeds;
+    }
+
+    private static string Truncate(string text, int max) =>
+        text.Length <= max ? text : text[..(max - 4)] + "\n...";
+
+    // Cuts at the last line break that leaves room for the note, so markdown lists stay intact.
+    private static string FitToBudget(string text, int budget)
+    {
+        if (text.Length <= budget)
+            return text;
+
+        var room = budget - TrimmedNote.Length;
+        var cut = text.LastIndexOf('\n', room - 1);
+        if (cut <= 0) cut = room;
+        return text[..cut].TrimEnd() + TrimmedNote;
     }
 
     private static IEnumerable<string> SplitForEmbed(string text, int limit)

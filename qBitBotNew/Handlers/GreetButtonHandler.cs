@@ -9,7 +9,7 @@ using qBitBotNew.Services;
 namespace qBitBotNew.Handlers;
 
 public sealed class GreetButtonHandler(
-    GeminiService geminiService,
+    ClaudeService claudeService,
     FeedbackService feedbackService,
     RateLimiterService rateLimiterService,
     RestClient restClient,
@@ -19,7 +19,7 @@ public sealed class GreetButtonHandler(
     [ComponentInteraction("greet_invoke")]
     public async Task Invoke(ulong userId, ulong channelId, ulong anchorMessageId)
     {
-        // Only the targeted user can opt in — prevents anyone from triggering Gemini
+        // Only the targeted user can opt in — prevents anyone from triggering Claude
         // calls on someone else's behalf and burning their daily budget.
         if (Context.User.Id != userId)
         {
@@ -113,10 +113,10 @@ public sealed class GreetButtonHandler(
             }
         }
 
-        List<GeminiMessage> conversation =
+        List<ChatMessage> conversation =
         [
             new("user", string.Join("\n", contextParts)),
-            new("model", "Understood. I've read the conversation context. What's the question?"),
+            new("assistant", "Understood. I've read the conversation context. What's the question?"),
             new("user", "Answer the primary question from the context above.")
         ];
 
@@ -141,13 +141,13 @@ public sealed class GreetButtonHandler(
             // Fall back to posting in the parent channel.
         }
 
-        // Placeholder so the thread isn't empty during the Gemini wait.
+        // Placeholder so the thread isn't empty during the Claude wait.
         var placeholder = await restClient.SendMessageAsync(responseChannelId, new MessageProperties
         {
             Embeds = [EmbedResponseFormatter.BuildPlaceholderEmbed()]
         });
 
-        var result = await geminiService.AskAsync(conversation, attachments);
+        var result = await claudeService.AskAsync(conversation, attachments);
         if (result.IsFailure || result.Value is null)
         {
             await restClient.ModifyMessageAsync(responseChannelId, placeholder.Id, opts =>
@@ -161,12 +161,13 @@ public sealed class GreetButtonHandler(
             return;
         }
 
-        var geminiResponse = result.Value;
-        var prompt = conversation.Last().Content;
+        var botResponse = result.Value;
+        // Persist the anchor message, not the synthetic "Answer the primary question…" turn.
+        var prompt = $"[{anchorTime}] {anchorName}: {anchor.Content}";
 
-        if (!geminiResponse.ShouldRespond)
+        if (!botResponse.ShouldRespond)
         {
-            var rejection = geminiResponse.IsPiracy
+            var rejection = botResponse.IsPiracy
                 ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions."
                 : "That doesn't look like a qBitTorrent question — I can only help with the client itself.";
             await restClient.ModifyMessageAsync(responseChannelId, placeholder.Id, opts =>
@@ -179,11 +180,11 @@ public sealed class GreetButtonHandler(
                 }];
             });
             await feedbackService.RecordResponseAsync(
-                geminiResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
+                botResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
             return;
         }
 
-        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+        var embeds = EmbedResponseFormatter.BuildEmbeds(botResponse);
         await restClient.ModifyMessageAsync(responseChannelId, placeholder.Id, opts =>
         {
             opts.Embeds = embeds;
@@ -191,10 +192,10 @@ public sealed class GreetButtonHandler(
         });
 
         await feedbackService.RecordResponseAsync(
-            geminiResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
+            botResponse, prompt, placeholder.Id, responseChannelId, userId, guildId);
 
-        if (spawnedThreadId is not null && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
-            await ThreadNaming.TryRenameAsync(restClient, spawnedThreadId.Value, ThreadNaming.Build(geminiResponse.Topic));
+        if (spawnedThreadId is not null && !string.IsNullOrWhiteSpace(botResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, spawnedThreadId.Value, ThreadNaming.Build(botResponse.Topic));
     }
 
     private static string GetDisplayName(User author) =>

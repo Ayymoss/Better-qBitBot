@@ -15,7 +15,7 @@ public enum ConfidenceLevel
     High
 }
 
-public sealed record GeminiResponse
+public sealed record BotResponse
 {
     [JsonPropertyName("intent")]
     public string Intent { get; init; } = "off_topic";
@@ -29,21 +29,18 @@ public sealed record GeminiResponse
     [JsonPropertyName("resources")]
     public List<string> Resources { get; init; } = [];
 
-    [JsonPropertyName("reasoning")]
-    public string Reasoning { get; init; } = string.Empty;
-
     [JsonPropertyName("follow_up_questions")]
     public List<string> FollowUpQuestions { get; init; } = [];
 
     [JsonPropertyName("topic")]
     public string Topic { get; init; } = string.Empty;
 
-    // Populated post-deserialization from Gemini thinking parts (where part.thought == true).
+    // Populated post-deserialization from Claude's summarized thinking blocks.
     // Not part of the structured-output schema.
     [JsonIgnore]
     public string ThoughtSummary { get; init; } = string.Empty;
 
-    // Token usage from response.usageMetadata. Set post-deserialization for persistence + stats.
+    // Token usage from response.usage. Set post-deserialization for persistence + stats.
     [JsonIgnore]
     public TokenUsage Usage { get; init; } = TokenUsage.Empty;
 

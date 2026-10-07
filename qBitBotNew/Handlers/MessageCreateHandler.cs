@@ -14,7 +14,7 @@ using qBitBotNew.Services;
 namespace qBitBotNew.Handlers;
 
 public sealed partial class MessageCreateHandler(
-    GeminiService geminiService,
+    ClaudeService claudeService,
     RateLimiterService rateLimiterService,
     FeedbackService feedbackService,
     GreetService greetService,
@@ -59,7 +59,12 @@ public sealed partial class MessageCreateHandler(
             // Someone replying to the bot — continuation or invocation on behalf
             if (referenced.Author.Id == botUserId)
             {
-                await HandleReplyToBot(message, referenced, ct);
+                // Inside a bot thread the whole thread is the conversation — Discord only nests
+                // one level of referenced_message, so the reply chain would lose most of it.
+                if (await IsBotThreadAsync(message, ct))
+                    await HandleThreadConversation(message, ct);
+                else
+                    await HandleReplyToBot(message, referenced, ct);
                 return;
             }
 
@@ -72,17 +77,16 @@ public sealed partial class MessageCreateHandler(
         }
 
         // Check if this is a direct @mention of the bot
-        if (IsBotMentioned(message, botUserId))
+        // Inside a thread the bot has previously responded in, every user message continues
+        // the conversation — @mention or not. Threads spawned by an earlier invocation are
+        // purpose-built for one issue, so we don't require the mention there.
+        if (await IsBotThreadAsync(message, ct))
         {
-            await HandleDirectMention(message, ct);
+            await HandleThreadConversation(message, ct);
             return;
         }
 
-        // Auto-reply inside a thread the bot has previously responded in. Threads spawned
-        // by an earlier invocation are purpose-built for a conversation, so we treat every
-        // user message there as a direct question without needing the @mention.
-        if (await IsThreadChannelAsync(message, ct)
-            && await feedbackService.HasBotRespondedInChannelAsync(message.ChannelId, ct))
+        if (IsBotMentioned(message, botUserId))
         {
             await HandleDirectMention(message, ct);
             return;
@@ -189,10 +193,10 @@ public sealed partial class MessageCreateHandler(
         while (current is not null)
         {
             var isBot = current.Author.Id == gatewayClient.Id;
-            // Bot messages use embeds; user messages use Content
+            // Bot messages use embeds; user messages use Content (minus the reply ping)
             var content = isBot
                 ? current.Embeds.FirstOrDefault()?.Description ?? current.Content
-                : current.Content;
+                : current.Content.Replace($"<@{gatewayClient.Id}>", "").Trim();
             if (!string.IsNullOrEmpty(content))
                 chain.Add((isBot, content));
             current = current.ReferencedMessage;
@@ -200,21 +204,21 @@ public sealed partial class MessageCreateHandler(
 
         chain.Reverse();
 
-        // Build proper multi-turn conversation for Gemini
-        List<GeminiMessage> conversation = [];
+        // Build proper multi-turn conversation for Claude
+        List<ChatMessage> conversation = [];
         foreach (var (isBot, content) in chain)
-            conversation.Add(new GeminiMessage(isBot ? "model" : "user", content));
+            conversation.Add(new ChatMessage(isBot ? "assistant" : "user", content));
 
         // Add the current follow-up as the final user turn. Strip the bot's @mention token
-        // (Discord auto-pings on reply by default) so Gemini doesn't see raw <@id> noise.
+        // (Discord auto-pings on reply by default) so Claude doesn't see raw <@id> noise.
         var botMention = $"<@{gatewayClient.Id}>";
         var followUpText = message.Content.Replace(botMention, "").Trim();
-        conversation.Add(new GeminiMessage("user", followUpText));
+        conversation.Add(new ChatMessage("user", followUpText));
 
         var attachments = ExtractAttachments(message);
         // Reply-to-bot stays in-place: continuation of an existing conversation, no thread spawn.
         // If the bot's previous message was inside a thread, message.ChannelId already is that thread.
-        await RespondWithConversation(message, message.ChannelId, conversation, attachments, ct: ct);
+        await RespondWithConversation(message, message.ChannelId, conversation, attachments, followUpText, ct: ct);
     }
 
     private async Task HandleInvocationOnBehalf(Message message, RestMessage targetMessage, CancellationToken ct = default)
@@ -234,10 +238,10 @@ public sealed partial class MessageCreateHandler(
         await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
 
         // Gather context from the target user's messages, always including the replied-to message
-        var (conversation, attachments) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
+        var (conversation, attachments, question) = await GatherUserContext(message, targetMessage.Author.Id, targetMessage, ct);
 
         var responseChannelId = await EnsureThreadAsync(message, ct);
-        await RespondWithConversation(message, responseChannelId, conversation, attachments, ct: ct);
+        await RespondWithConversation(message, responseChannelId, conversation, attachments, question, ct: ct);
     }
 
     private async Task HandleDirectMention(Message message, CancellationToken ct = default)
@@ -253,10 +257,149 @@ public sealed partial class MessageCreateHandler(
         await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
 
         // Gather context from the invoking user's messages only
-        var (conversation, attachments) = await GatherUserContext(message, message.Author.Id, ct: ct);
+        var (conversation, attachments, question) = await GatherUserContext(message, message.Author.Id, ct: ct);
 
         var responseChannelId = await EnsureThreadAsync(message, ct);
-        await RespondWithConversation(message, responseChannelId, conversation, attachments, ct: ct);
+        await RespondWithConversation(message, responseChannelId, conversation, attachments, question, ct: ct);
+    }
+
+    private async Task<bool> IsBotThreadAsync(Message message, CancellationToken ct) =>
+        await IsThreadChannelAsync(message, ct)
+        && await feedbackService.HasBotRespondedInChannelAsync(message.ChannelId, ct);
+
+    private async Task HandleThreadConversation(Message message, CancellationToken ct = default)
+    {
+        var budget = await rateLimiterService.CheckBudgetAsync(message.Author.Id, ct);
+        if (!budget.Allowed)
+        {
+            await NotifyBudgetExceeded(message, budget, ct);
+            return;
+        }
+
+        await greetService.SuppressAsync(message.Author.Id, GreetSuppressionReason.Invoked, ct);
+
+        var (conversation, attachments, question) = await GatherThreadConversation(message, ct);
+        await RespondWithConversation(message, message.ChannelId, conversation, attachments, question, cacheConversation: true, ct: ct);
+    }
+
+    private const int MaxThreadHistory = 100;
+
+    // Rebuilds a bot thread as real turns: the message the thread was started from, then every
+    // human message as a user turn and every bot answer as an assistant turn, oldest first.
+    // Compared with the flattened context blob used for first invocations, the model sees its
+    // own earlier answers as its own turns, and earlier turns come out byte-identical on every
+    // follow-up, so the conversation prefix is served from the prompt cache.
+    //
+    // Everything here must format the same way on every request or the cache misses: names
+    // skip guild nicknames (REST history has no member data, the live gateway message does),
+    // and the current message is formatted exactly as it will appear in the next request.
+    private async Task<(List<ChatMessage> Conversation, List<AttachmentInfo> Attachments, string Question)> GatherThreadConversation(
+        Message message, CancellationToken ct)
+    {
+        var botUserId = gatewayClient.Id;
+
+        List<RestMessage> history = [];
+        await foreach (var m in restClient.GetMessagesAsync(message.ChannelId,
+                           new PaginationProperties<ulong> { From = message.Id, Direction = PaginationDirection.Before, BatchSize = MaxThreadHistory })
+                           .WithCancellation(ct))
+        {
+            history.Add(m);
+            if (history.Count >= MaxThreadHistory)
+                break;
+        }
+        history.Reverse();
+
+        List<ChatMessage> conversation = [];
+
+        // The thread's starter lives in the parent channel. If it was itself a reply (someone
+        // invoking the bot on another user's message), that message is the real question.
+        if (await TryGetThreadStarterAsync(message, ct) is { } starter)
+        {
+            if (starter.ReferencedMessage is { } repliedTo && FormatThreadUserTurn(repliedTo) is { } repliedTurn)
+                conversation.Add(new ChatMessage("user", repliedTurn));
+            if (FormatThreadUserTurn(starter) is { } starterTurn)
+                conversation.Add(new ChatMessage("user", starterTurn));
+        }
+
+        // Images posted since the bot last answered haven't been seen yet; older ones were
+        // covered by an earlier answer and aren't worth re-sending on every follow-up.
+        List<AttachmentInfo> attachments = [];
+        foreach (var m in history)
+        {
+            if (m.Type is not (MessageType.Default or MessageType.Reply))
+                continue;
+
+            if (m.Author.Id == botUserId)
+            {
+                if (FormatThreadBotTurn(m) is { } botTurn)
+                {
+                    conversation.Add(new ChatMessage("assistant", botTurn));
+                    attachments.Clear();
+                }
+            }
+            else if (!m.Author.IsBot && FormatThreadUserTurn(m) is { } userTurn)
+            {
+                conversation.Add(new ChatMessage("user", userTurn));
+                attachments.AddRange(ExtractAttachments(m));
+            }
+        }
+
+        var question = FormatThreadUserTurn(message) ?? "(no text)";
+        conversation.Add(new ChatMessage("user", question));
+        attachments.AddRange(ExtractAttachments(message));
+
+        return (conversation, attachments, question);
+    }
+
+    private async Task<RestMessage?> TryGetThreadStarterAsync(Message message, CancellationToken ct)
+    {
+        try
+        {
+            var thread = message.Channel as GuildThread
+                         ?? await restClient.GetChannelAsync(message.ChannelId, cancellationToken: ct) as GuildThread;
+            if (thread is null)
+                return null;
+
+            // Threads spawned on a message share that message's id.
+            return await restClient.GetMessageAsync(thread.ParentId, thread.Id, cancellationToken: ct);
+        }
+        catch
+        {
+            // Thread not started from a message, or the starter was deleted.
+            return null;
+        }
+    }
+
+    private string? FormatThreadUserTurn(RestMessage m)
+    {
+        var text = m.Content.Replace($"<@{gatewayClient.Id}>", "").Trim();
+        var hasImage = m.Attachments.Any();
+        if (text.Length == 0 && !hasImage)
+            return null;
+
+        var name = m.Author.GlobalName ?? m.Author.Username;
+        return $"[{m.CreatedAt:HH:mm}] {name}: {text}{(hasImage ? " [has attached image]" : "")}";
+    }
+
+    // The answer embeds (untitled), plus the follow-up questions the bot asked. Resources and
+    // footers are presentation, not conversation. Placeholders mean a request is in flight.
+    private static string? FormatThreadBotTurn(RestMessage m)
+    {
+        var answer = string.Join("\n", m.Embeds
+            .Where(e => e.Title is null && !string.IsNullOrWhiteSpace(e.Description))
+            .Select(e => e.Description));
+        if (answer.Length == 0)
+            answer = m.Content;
+        // Error notices aren't answers; keep them out of the model's view of its own history.
+        if (string.IsNullOrWhiteSpace(answer)
+            || EmbedResponseFormatter.IsPlaceholder(answer)
+            || answer.StartsWith("Something went wrong", StringComparison.Ordinal))
+            return null;
+
+        if (m.Embeds.FirstOrDefault(e => e.Title == EmbedResponseFormatter.QuestionsTitle) is { Description: { } asked })
+            answer += $"\n\nI asked:\n{asked}";
+
+        return answer;
     }
 
     // Returns the channel id the bot should post into. If the invoking message is in a
@@ -282,7 +425,7 @@ public sealed partial class MessageCreateHandler(
         {
             var botMention = $"<@{gatewayClient.Id}>";
             var stripped = message.Content.Replace(botMention, "").Trim();
-            // Initial name from the question — renamed once Gemini returns a topic.
+            // Initial name from the question — renamed once Claude returns a topic.
             var threadName = ThreadNaming.Build(stripped);
             var thread = await restClient.CreateGuildThreadAsync(
                 message.ChannelId,
@@ -300,7 +443,9 @@ public sealed partial class MessageCreateHandler(
         }
     }
 
-    private async Task<(List<GeminiMessage> Conversation, List<AttachmentInfo> Attachments)> GatherUserContext(
+    // Question is what gets persisted as the Feedback prompt — the actual message(s) being answered,
+    // not the synthetic "Answer the primary question…" turn the model sees.
+    private async Task<(List<ChatMessage> Conversation, List<AttachmentInfo> Attachments, string Question)> GatherUserContext(
         Message invokingMessage, ulong contextUserId, RestMessage? anchorMessage = null, CancellationToken ct = default)
     {
         var botUserId = gatewayClient.Id;
@@ -358,34 +503,45 @@ public sealed partial class MessageCreateHandler(
         }
 
         // Build the conversation as: background context (user) -> ack (model) -> current question (user)
-        List<GeminiMessage> conversation = [];
+        List<ChatMessage> conversation = [];
 
         if (contextParts.Count > 0)
         {
-            conversation.Add(new GeminiMessage("user", string.Join("\n", contextParts)));
-            conversation.Add(new GeminiMessage("model", "Understood. I've read the conversation context. What's the question?"));
+            conversation.Add(new ChatMessage("user", string.Join("\n", contextParts)));
+            conversation.Add(new ChatMessage("assistant", "Understood. I've read the conversation context. What's the question?"));
         }
 
         // Handle the invoking message itself
         var botMention = $"<@{botUserId}>";
         var invokerText = invokingMessage.Content.Replace(botMention, "").Trim();
 
+        List<string> questionParts = [];
+        if (anchorMessage is not null && !string.IsNullOrWhiteSpace(anchorMessage.Content))
+            questionParts.Add($"[{anchorMessage.CreatedAt:HH:mm}] {GetDisplayName(anchorMessage.Author)}: {anchorMessage.Content}");
+
         if (!string.IsNullOrWhiteSpace(invokerText))
         {
             var invokerName = GetDisplayName(invokingMessage.Author);
             var invokerTime = invokingMessage.CreatedAt.ToString("HH:mm");
-            conversation.Add(new GeminiMessage("user", $"[{invokerTime}] {invokerName}: {invokerText}"));
+            var invokerLine = $"[{invokerTime}] {invokerName}: {invokerText}";
+            conversation.Add(new ChatMessage("user", invokerLine));
+            questionParts.Add(invokerLine);
         }
         else if (anchorMessage is not null)
         {
-            conversation.Add(new GeminiMessage("user", "Answer the primary question from the context above."));
+            conversation.Add(new ChatMessage("user", "Answer the primary question from the context above."));
         }
         else
         {
-            conversation.Add(new GeminiMessage("user", "Answer based on the user's recent messages and any attached images."));
+            conversation.Add(new ChatMessage("user", "Answer based on the user's recent messages and any attached images."));
+            // Bare @mention: the question is whatever the user said most recently.
+            var lastUserMessage = channelMessages.LastOrDefault(m => m.Author.Id == contextUserId && !string.IsNullOrWhiteSpace(m.Content));
+            if (lastUserMessage is not null)
+                questionParts.Add($"[{lastUserMessage.CreatedAt:HH:mm}] {GetDisplayName(lastUserMessage.Author)}: {lastUserMessage.Content}");
         }
 
-        return (conversation, attachments);
+        var question = questionParts.Count > 0 ? string.Join("\n", questionParts) : conversation[^1].Content;
+        return (conversation, attachments, question);
     }
 
     private string FormatContextMessage(RestMessage m, ulong botUserId)
@@ -404,14 +560,14 @@ public sealed partial class MessageCreateHandler(
     private static string GetDisplayName(User author) =>
         (author as GuildUser)?.Nickname ?? author.GlobalName ?? author.Username;
 
-    private async Task RespondWithConversation(Message message, ulong targetChannelId, List<GeminiMessage> conversation, List<AttachmentInfo> attachments, bool isDirectInvocation = true, CancellationToken ct = default)
+    private async Task RespondWithConversation(Message message, ulong targetChannelId, List<ChatMessage> conversation, List<AttachmentInfo> attachments, string prompt, bool isDirectInvocation = true, bool cacheConversation = false, CancellationToken ct = default)
     {
         // Reply references only work inside the same channel as the original message.
         // When responding inside a spawned thread, the thread itself anchors the conversation.
         var sameChannel = targetChannelId == message.ChannelId;
 
         // Post a placeholder right away so the user sees the bot has accepted the question
-        // while Gemini runs. The placeholder gets edited in-place with the final response.
+        // while Claude runs. The placeholder gets edited in-place with the final response.
         RestMessage? placeholder = null;
         try
         {
@@ -432,7 +588,7 @@ public sealed partial class MessageCreateHandler(
         try
         {
             using var typing = restClient.EnterTypingScope(targetChannelId);
-            var result = await geminiService.AskAsync(conversation, attachments, ct);
+            var result = await claudeService.AskAsync(conversation, attachments, cacheConversation, ct);
 
             if (result.IsFailure || result.Value is null)
             {
@@ -441,12 +597,11 @@ public sealed partial class MessageCreateHandler(
                 return;
             }
 
-            var geminiResponse = result.Value;
-            var prompt = conversation.LastOrDefault(t => t.Role == "user")?.Content ?? string.Empty;
+            var botResponse = result.Value;
 
             // Rejection: edit placeholder to the rejection embed. Still persisted so it
             // counts toward the daily turn budget.
-            if (!geminiResponse.ShouldRespond)
+            if (!botResponse.ShouldRespond)
             {
                 if (!isDirectInvocation)
                 {
@@ -455,7 +610,7 @@ public sealed partial class MessageCreateHandler(
                     return;
                 }
 
-                var rejection = geminiResponse.IsPiracy
+                var rejection = botResponse.IsPiracy
                     ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                     : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
                 var rejectionEmbed = new EmbedProperties
@@ -485,7 +640,7 @@ public sealed partial class MessageCreateHandler(
                 }
 
                 await feedbackService.RecordResponseAsync(
-                    geminiResponse, prompt, rejectionMessageId,
+                    botResponse, prompt, rejectionMessageId,
                     targetChannelId, message.Author.Id, message.GuildId, ct);
                 return;
             }
@@ -493,7 +648,7 @@ public sealed partial class MessageCreateHandler(
             // On-topic: assemble [answer..., questions?, resources?] embeds and post as a
             // single message. Buttons attach to the message; the message id is persisted so
             // FeedbackButtonHandler / Why can look it up.
-            var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+            var embeds = EmbedResponseFormatter.BuildEmbeds(botResponse);
             ulong feedbackMessageId;
 
             if (placeholder is not null)
@@ -519,7 +674,7 @@ public sealed partial class MessageCreateHandler(
             }
 
             await feedbackService.RecordResponseAsync(
-                geminiResponse,
+                botResponse,
                 prompt,
                 feedbackMessageId,
                 targetChannelId,
@@ -528,9 +683,9 @@ public sealed partial class MessageCreateHandler(
                 ct);
 
             // If we spawned a thread (targetChannelId differs from invoking channel) rename it
-            // to Gemini's chosen topic for searchability. Best-effort; failure ignored.
-            if (!sameChannel && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
-                await ThreadNaming.TryRenameAsync(restClient, targetChannelId, ThreadNaming.Build(geminiResponse.Topic), ct);
+            // to Claude's chosen topic for searchability. Best-effort; failure ignored.
+            if (!sameChannel && !string.IsNullOrWhiteSpace(botResponse.Topic))
+                await ThreadNaming.TryRenameAsync(restClient, targetChannelId, ThreadNaming.Build(botResponse.Topic), ct);
         }
         catch (Exception ex)
         {

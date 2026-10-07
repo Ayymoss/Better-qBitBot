@@ -1,17 +1,17 @@
 # qBitBot
 
-A Discord bot that provides automated qBitTorrent support using Google Gemini. It monitors channels for questions from new server members and responds with helpful answers, and can be invoked on-demand by anyone via `@mention` or reply.
+A Discord bot that provides automated qBitTorrent support using Claude (Haiku 5.5). It monitors channels for questions from new server members and responds with helpful answers, and can be invoked on-demand by anyone via `@mention` or reply.
 
 ## Features
 
 - **Auto-response for new users** — Detects questions from users who joined within the last 24 hours and responds after a 60-second aggregation window (collecting multi-message questions)
 - **On-demand invocation** — Any user can `@mention` the bot or reply to its messages for help
 - **Proxy invocation** — `@mention` the bot while replying to another user's message to get an answer on their behalf
-- **Intent classification** — Gemini classifies questions as on-topic, off-topic, or piracy-related using structured outputs
-- **Image/screenshot support** — Attached images are sent to Gemini for visual context
+- **Intent classification** — Claude classifies questions as on-topic, off-topic, or piracy-related using structured outputs
+- **Image/screenshot support** — Attached images are sent to Claude for visual context (JPEG/PNG/GIF/WebP)
 - **Intervention detection** — If a human starts helping during the aggregation window, the bot backs off
 - **Per-user rate limiting** — 60-second cooldown on direct invocations to prevent spam
-- **Grounding with Google Search** — Gemini uses Google Search to provide accurate, up-to-date answers and resource links
+- **Web search** — Claude can search the web for version-specific or recent issues (capped per request, toggleable)
 
 ## Requirements
 
@@ -19,7 +19,7 @@ A Discord bot that provides automated qBitTorrent support using Google Gemini. I
 - A [Discord bot token](https://discord.com/developers/applications) with the following privileged intents enabled:
   - Message Content Intent
   - Server Members Intent
-- A [Google Gemini API key](https://aistudio.google.com/apikey)
+- An [Anthropic API key](https://platform.claude.com/settings/keys)
 
 ### Discord Bot Permissions
 
@@ -36,21 +36,24 @@ Configuration is provided via `appsettings.json`, environment variables, or [use
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Discord:Token` | Discord bot token | *required* |
-| `Gemini:ApiKey` | Google Gemini API key | *required* |
-| `Gemini:Model` | Gemini model to use | `gemini-3.5-flash` |
+| `Anthropic:ApiKey` | Anthropic API key | *required* |
+| `Anthropic:Model` | Claude model to use | `claude-haiku-5-5` |
+| `Anthropic:Effort` | Thinking effort: `low`/`medium`/`high`/`xhigh`/`max` | `medium` |
+| `Anthropic:WebSearchEnabled` | Allow Claude to use web search ($10 / 1k searches) | `true` |
+| `Anthropic:WebSearchMaxUses` | Max web searches per request | `3` |
 | `Bot:NewUserThresholdHours` | Hours since join to consider a user "new" (for greeting) | `24` |
-| `Bot:DailyTurnBudget` | Gemini calls per user per sliding 24h window | `20` |
+| `Bot:DailyTurnBudget` | Claude calls per user per sliding 24h window | `20` |
 | `Bot:GreetEnabled` | Offer the bot to new users after a quiet period (once per user, ever) | `true` |
 | `Bot:GreetWaitMinutes` | Minutes to wait after a new user's last message before greeting | `10` |
 | `Bot:ErrorContactHandle` | Discord handle to ping in error messages | `@ayymoss` |
-| `Bot:MaxAttachmentBytes` | Max size of an image attachment sent to Gemini (bytes) | `10485760` |
+| `Bot:MaxAttachmentBytes` | Max size of an image attachment sent to Claude (bytes) | `10485760` |
 | `Persistence:DatabaseFile` | SQLite file path (relative paths resolved against CWD) | `data/qbitbot.db` |
 
 ### User Secrets (development)
 
 ```bash
 dotnet user-secrets set "Discord:Token" "your-token"
-dotnet user-secrets set "Gemini:ApiKey" "your-key"
+dotnet user-secrets set "Anthropic:ApiKey" "your-key"
 ```
 
 Requires `DOTNET_ENVIRONMENT=Development` to be set (configured in `Properties/launchSettings.json`).
@@ -72,7 +75,7 @@ docker run -d \
   --name qbitbot \
   --restart unless-stopped \
   -e Discord__Token=your_discord_token \
-  -e Gemini__ApiKey=your_gemini_key \
+  -e Anthropic__ApiKey=your_anthropic_key \
   qbitbot
 ```
 
@@ -86,21 +89,21 @@ docker run -d \
   --name qbitbot \
   --restart unless-stopped \
   -e Discord__Token=your_discord_token \
-  -e Gemini__ApiKey=your_gemini_key \
+  -e Anthropic__ApiKey=your_anthropic_key \
   ghcr.io/<owner>/qbitbotnew:latest
 ```
 
 ## How It Works
 
 1. **New user posts a message** — The bot starts a 60-second collection window, aggregating any follow-up messages and attachments from that user
-2. **Window closes** — The aggregated question (text + images) is sent to Gemini with a system prompt that classifies intent and generates a response
+2. **Window closes** — The aggregated question (text + images) is sent to Claude with a system prompt that classifies intent and generates a response
 3. **Bot responds** — If the question is on-topic, the bot replies to the user's first message with the answer and any relevant resources
 4. **Filtering** — Piracy and off-topic questions are silently ignored for auto-responses; direct invocations get a brief explanation of why the bot can't help
 
 ## Tech Stack
 
 - [NetCord](https://netcord.dev/) — Discord library for .NET
-- [Google Gemini API](https://ai.google.dev/) — AI model with structured outputs, grounding, and vision
+- [Claude API](https://platform.claude.com/docs) — Claude Haiku 5.5 with structured outputs, web search, and vision
 - [Serilog](https://serilog.net/) — Structured logging (console + file sinks)
 - .NET Generic Host
 

@@ -10,7 +10,7 @@ public sealed record BotConfig
     public bool GreetEnabled { get; init; } = true;
     public int GreetWaitMinutes { get; init; } = 10;
 
-    // Sliding 24h budget per user, counted from the Feedback table (every Gemini call).
+    // Sliding 24h budget per user, counted from the Feedback table (every Claude call).
     // Exceeding it points the user at Gemini / Claude directly for long discussions.
     public int DailyTurnBudget { get; init; } = 20;
 

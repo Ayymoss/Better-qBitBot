@@ -1,7 +1,9 @@
+using Anthropic;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Hosting.Gateway;
@@ -32,7 +34,7 @@ try
 
     // Bind configuration sections
     builder.Services.Configure<BotConfig>(builder.Configuration.GetSection("Bot"));
-    builder.Services.Configure<GeminiConfig>(builder.Configuration.GetSection("Gemini"));
+    builder.Services.Configure<AnthropicConfig>(builder.Configuration.GetSection("Anthropic"));
     builder.Services.Configure<PersistenceConfig>(builder.Configuration.GetSection("Persistence"));
 
     // SQLite persistence — file path resolved at startup. Directory is created on demand
@@ -74,8 +76,15 @@ try
     builder.Services.AddComponentInteractions<ButtonInteraction, ButtonInteractionContext>();
     builder.Services.AddComponentInteractions<ModalInteraction, ModalInteractionContext>();
 
-    // HTTP client for Gemini API
-    builder.Services.AddHttpClient<GeminiService>();
+    // Claude API client (singleton, thread-safe). The typed HttpClient on ClaudeService is
+    // only used to download Discord attachments.
+    // Falls back to the SDK's own ANTHROPIC_API_KEY lookup when Anthropic:ApiKey is unset.
+    builder.Services.AddSingleton(sp =>
+    {
+        var apiKey = sp.GetRequiredService<IOptions<AnthropicConfig>>().Value.ApiKey;
+        return string.IsNullOrWhiteSpace(apiKey) ? new AnthropicClient() : new AnthropicClient { ApiKey = apiKey };
+    });
+    builder.Services.AddHttpClient<ClaudeService>();
 
     // Services
     builder.Services.AddSingleton<RateLimiterService>();

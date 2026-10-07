@@ -9,7 +9,7 @@ using qBitBotNew.Services;
 namespace qBitBotNew.Handlers;
 
 public sealed class QBitCommands(
-    GeminiService geminiService,
+    ClaudeService claudeService,
     FeedbackService feedbackService,
     RateLimiterService rateLimiterService,
     GreetService greetService,
@@ -47,7 +47,7 @@ public sealed class QBitCommands(
         var conf7d = s.HighCount7d + s.MediumCount7d + s.LowCount7d;
 
         var lowList = s.LowConfidencePrompts7d.Count == 0
-            ? "_None — Gemini was confident in every answer this week._"
+            ? "_None — the bot was confident in every answer this week._"
             : string.Join("\n", s.LowConfidencePrompts7d.Select(p =>
             {
                 var trimmed = p.Replace('\n', ' ').Trim();
@@ -101,7 +101,7 @@ public sealed class QBitCommands(
                     Inline = false
                 }
             ],
-            Footer = new EmbedFooterProperties { Text = "Every Gemini call counts toward the daily budget. Times are UTC." }
+            Footer = new EmbedFooterProperties { Text = "Every model call counts toward the daily budget. Times are UTC." }
         };
 
         await FollowupAsync(new InteractionMessageProperties
@@ -156,7 +156,7 @@ public sealed class QBitCommands(
                 new EmbedFieldProperties
                 {
                     Name = "Rate my answers",
-                    Value = "Use the 👍 / 👎 buttons. Feedback helps improve future responses.",
+                    Value = "Use the Helpful / Not Helpful buttons. Feedback helps improve future responses.",
                     Inline = false
                 }
             ],
@@ -181,10 +181,10 @@ public sealed class QBitCommands(
             return;
         }
 
-        // Defer (visible). Gemini takes ~10s.
+        // Defer (visible). Claude takes a few seconds.
         await RespondAsync(InteractionCallback.DeferredMessage());
 
-        var result = await geminiService.AskAsync([new GeminiMessage("user", question)]);
+        var result = await claudeService.AskAsync([new ChatMessage("user", question)]);
 
         if (result.IsFailure || result.Value is null)
         {
@@ -196,12 +196,12 @@ public sealed class QBitCommands(
             return;
         }
 
-        var geminiResponse = result.Value;
+        var botResponse = result.Value;
 
-        if (!geminiResponse.ShouldRespond)
+        if (!botResponse.ShouldRespond)
         {
             // Send rejection as ephemeral so it doesn't clutter the channel or create an empty thread.
-            var rejection = geminiResponse.IsPiracy
+            var rejection = botResponse.IsPiracy
                 ? "Sorry, I can't help with that. I'm only able to assist with qBitTorrent client questions — topics related to piracy or illegal downloads are outside my scope."
                 : "That doesn't seem to be a qBitTorrent question. I can help with qBitTorrent client configuration, troubleshooting, and usage — feel free to ask!";
 
@@ -216,7 +216,7 @@ public sealed class QBitCommands(
                 Flags = MessageFlags.Ephemeral
             });
             await feedbackService.RecordResponseAsync(
-                geminiResponse, question, rejectionSent.Id,
+                botResponse, question, rejectionSent.Id,
                 Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
             return;
         }
@@ -245,7 +245,7 @@ public sealed class QBitCommands(
             }
         }
 
-        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+        var embeds = EmbedResponseFormatter.BuildEmbeds(botResponse);
         RestMessage sent;
         if (responseChannelId == Context.Channel.Id)
         {
@@ -265,11 +265,11 @@ public sealed class QBitCommands(
         }
 
         await feedbackService.RecordResponseAsync(
-            geminiResponse, question, sent.Id, responseChannelId,
+            botResponse, question, sent.Id, responseChannelId,
             Context.User.Id, Context.Guild?.Id);
 
-        if (responseChannelId != Context.Channel.Id && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
-            await ThreadNaming.TryRenameAsync(restClient, responseChannelId, ThreadNaming.Build(geminiResponse.Topic));
+        if (responseChannelId != Context.Channel.Id && !string.IsNullOrWhiteSpace(botResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, responseChannelId, ThreadNaming.Build(botResponse.Topic));
     }
 
     [MessageCommand("Ask qBitBot")]
@@ -311,7 +311,7 @@ public sealed class QBitCommands(
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-        var result = await geminiService.AskAsync([new GeminiMessage("user", question)], attachments);
+        var result = await claudeService.AskAsync([new ChatMessage("user", question)], attachments);
 
         if (result.IsFailure || result.Value is null)
         {
@@ -322,11 +322,11 @@ public sealed class QBitCommands(
             return;
         }
 
-        var geminiResponse = result.Value;
+        var botResponse = result.Value;
 
-        if (!geminiResponse.ShouldRespond)
+        if (!botResponse.ShouldRespond)
         {
-            var rejection = geminiResponse.IsPiracy
+            var rejection = botResponse.IsPiracy
                 ? "Sorry, I can't help with that."
                 : "That doesn't seem to be a qBitTorrent question.";
 
@@ -340,12 +340,12 @@ public sealed class QBitCommands(
                 }]
             });
             await feedbackService.RecordResponseAsync(
-                geminiResponse, question, rejectionSent.Id,
+                botResponse, question, rejectionSent.Id,
                 Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
             return;
         }
 
-        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+        var embeds = EmbedResponseFormatter.BuildEmbeds(botResponse);
         var sent = await FollowupAsync(new InteractionMessageProperties
         {
             Embeds = embeds,
@@ -353,7 +353,7 @@ public sealed class QBitCommands(
         });
 
         await feedbackService.RecordResponseAsync(
-            geminiResponse,
+            botResponse,
             question,
             sent.Id,
             Context.Channel.Id,
@@ -402,7 +402,7 @@ public sealed class QBitCommands(
             .Select(a => new AttachmentInfo(a.Url, a.ContentType!))
             .ToList();
 
-        var result = await geminiService.AskAsync([new GeminiMessage("user", question)], attachments);
+        var result = await claudeService.AskAsync([new ChatMessage("user", question)], attachments);
 
         if (result.IsFailure || result.Value is null)
         {
@@ -414,11 +414,11 @@ public sealed class QBitCommands(
             return;
         }
 
-        var geminiResponse = result.Value;
+        var botResponse = result.Value;
 
-        if (!geminiResponse.ShouldRespond)
+        if (!botResponse.ShouldRespond)
         {
-            var rejection = geminiResponse.IsPiracy
+            var rejection = botResponse.IsPiracy
                 ? "Sorry, I can't help with that — it looks piracy-related."
                 : "That doesn't seem to be a qBitTorrent question.";
 
@@ -433,12 +433,12 @@ public sealed class QBitCommands(
                 Flags = MessageFlags.Ephemeral
             });
             await feedbackService.RecordResponseAsync(
-                geminiResponse, question, rejectionSent.Id,
+                botResponse, question, rejectionSent.Id,
                 Context.Channel.Id, Context.User.Id, Context.Guild?.Id);
             return;
         }
 
-        var embeds = EmbedResponseFormatter.BuildEmbeds(geminiResponse);
+        var embeds = EmbedResponseFormatter.BuildEmbeds(botResponse);
 
         // Try to spawn a thread on the target message. If we're already inside a thread
         // (Discord disallows nesting) or thread creation fails, fall back to posting
@@ -469,11 +469,11 @@ public sealed class QBitCommands(
         });
 
         await feedbackService.RecordResponseAsync(
-            geminiResponse, question, sent.Id, responseChannelId,
+            botResponse, question, sent.Id, responseChannelId,
             Context.User.Id, Context.Guild?.Id);
 
-        if (threadId is not null && !string.IsNullOrWhiteSpace(geminiResponse.Topic))
-            await ThreadNaming.TryRenameAsync(restClient, threadId.Value, ThreadNaming.Build(geminiResponse.Topic));
+        if (threadId is not null && !string.IsNullOrWhiteSpace(botResponse.Topic))
+            await ThreadNaming.TryRenameAsync(restClient, threadId.Value, ThreadNaming.Build(botResponse.Topic));
 
         await FollowupAsync(new InteractionMessageProperties
         {

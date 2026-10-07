@@ -16,9 +16,9 @@ internal static class ThreadNaming
         return trimmed.Length <= SoftLimit ? trimmed : trimmed[..(SoftLimit - 3)] + "...";
     }
 
-    // Best topic available — Gemini's `topic` field when present, else first line of the question.
-    public static string Pick(string? geminiTopic, string fallbackQuestion) =>
-        Build(string.IsNullOrWhiteSpace(geminiTopic) ? fallbackQuestion : geminiTopic);
+    // Best topic available — Claude's `topic` field when present, else first line of the question.
+    public static string Pick(string? modelTopic, string fallbackQuestion) =>
+        Build(string.IsNullOrWhiteSpace(modelTopic) ? fallbackQuestion : modelTopic);
 
     public static async Task TryRenameAsync(RestClient client, ulong threadId, string newName, CancellationToken ct = default)
     {

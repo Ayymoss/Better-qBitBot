@@ -11,7 +11,7 @@ public sealed partial class FeedbackService(
     ILogger<FeedbackService> logger)
 {
     public async Task RecordResponseAsync(
-        GeminiResponse response,
+        BotResponse response,
         string prompt,
         ulong botMessageId,
         ulong channelId,
