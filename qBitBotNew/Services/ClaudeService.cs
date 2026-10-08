@@ -194,12 +194,22 @@ public sealed partial class ClaudeService(
                             continue;
                         }
 
+                        // Discord derives content_type from the file extension, so a PNG renamed
+                        // to .webp arrives as image/webp — and the API 400s the whole request on
+                        // a mismatch. Trust the bytes instead.
+                        if (SniffMediaType(imageBytes) is not { } mediaType)
+                        {
+                            imagesSkipped++;
+                            LogSkippingNonImage(attachment.ContentType, attachment.Url);
+                            continue;
+                        }
+
                         blocks.Add(new ImageBlockParam
                         {
                             Source = new Base64ImageSource
                             {
                                 Data = Convert.ToBase64String(imageBytes),
-                                MediaType = ToMediaType(attachment.ContentType)
+                                MediaType = mediaType
                             }
                         });
                         imagesAttached++;
@@ -379,13 +389,19 @@ public sealed partial class ClaudeService(
 
     private static string NormalizeUrl(string url) => url.Trim().TrimEnd('/');
 
-    private static MediaType ToMediaType(string contentType) => contentType.ToLowerInvariant() switch
+    // Identifies the image format from its magic bytes; null when it isn't one Claude accepts.
+    private static MediaType? SniffMediaType(ReadOnlySpan<byte> b)
     {
-        "image/png" => MediaType.ImagePng,
-        "image/gif" => MediaType.ImageGif,
-        "image/webp" => MediaType.ImageWebP,
-        _ => MediaType.ImageJpeg
-    };
+        if (b.StartsWith((ReadOnlySpan<byte>)[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+            return MediaType.ImagePng;
+        if (b.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xD8, 0xFF]))
+            return MediaType.ImageJpeg;
+        if (b.StartsWith("GIF87a"u8) || b.StartsWith("GIF89a"u8))
+            return MediaType.ImageGif;
+        if (b.Length >= 12 && b.StartsWith("RIFF"u8) && b[8..12].SequenceEqual("WEBP"u8))
+            return MediaType.ImageWebP;
+        return null;
+    }
 
     private static Effort ToEffort(string effort) => effort.ToLowerInvariant() switch
     {
